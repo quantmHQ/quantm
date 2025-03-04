@@ -37,16 +37,17 @@ excludes:
   - .*\.pb.go
   - .*\.puml
   - ^api/*
+  - pkgs/proto/*
 authors:
   - name: Breu, Inc.
     email: info@breu.io
 licenses:
   - files: any
     authors:
-    - name: Breu, Inc.
-      email: info@breu.io
+      - name: Breu, Inc.
+        email: info@breu.io
     use_dynamic_year_ranges: true
-    ident: FSL-1.1-Apache-2.0
+    ident: FSL-1.1-ALv2
     template: |
       Crafted with ❤ at [name of author], Copyright © [year].
 
@@ -70,7 +71,6 @@ licenses:
       CONDITIONS OF ANY KIND, either express or implied. See the License for the
       specific language governing permissions and limitations under the License.
 comments:
-  
   - extensions:
       - ts
       - js
