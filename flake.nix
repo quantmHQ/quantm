@@ -57,7 +57,6 @@
           modules = ./gomod2nix.toml;
           nativeBuildInputs = [pkgs.pkgconf];
           subPackages = ["cmd/quantm"];
-          go = pkgs.go_1_23;
           buildInputs = base;
           tags = ["static" "system_libgit2"];
         };
