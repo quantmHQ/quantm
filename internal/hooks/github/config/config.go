@@ -9,7 +9,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/go-playground/validator/v10"
-	gh "github.com/google/go-github/v62/github"
+	gh "github.com/google/go-github/v69/github"
 
 	pkgerrors "go.breu.io/quantm/internal/hooks/github/errors"
 )
