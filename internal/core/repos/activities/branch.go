@@ -72,20 +72,20 @@ func (a *Branch) Diff(ctx context.Context, payload *defs.DiffPayload) (*eventsv1
 	}
 
 	// 1. Get File Status (Added, Modified, Deleted, Renamed)
-	name, err := git.DiffNameStatus(ctx, payload.Path, payload.Base, payload.SHA)
+	names, err := git.DiffStatus(ctx, payload.Path, payload.Base, payload.SHA)
 	if err != nil {
 		slog.Warn("diff: failed to get name-status", "error", err)
 		return nil, err
 	}
 
 	// 2. Get Line Stats (Insertions, Deletions)
-	num, err := git.DiffNumStat(ctx, payload.Path, payload.Base, payload.SHA)
+	stats, err := git.DiffStat(ctx, payload.Path, payload.Base, payload.SHA)
 	if err != nil {
 		slog.Warn("diff: failed to get numstat", "error", err)
 		return nil, err
 	}
 
-	return a.parseDiffOutput(name, num)
+	return a.parse_diff(names, stats)
 }
 
 // Rebase performs a git rebase operation. Handles conflicts and returns result.
@@ -94,12 +94,14 @@ func (a *Branch) Rebase(ctx context.Context, payload *defs.RebasePayload) (*defs
 
 	// Ensure remote is up to date
 	if _, err := git.Fetch(ctx, payload.Path, payload.Rebase.Base); err != nil {
-		a.report_rebase_error(ctx, result, "rebase: unable to fetch base", err, payload.Rebase.Base, payload.Rebase.Head)
+		slog.Warn("rebase: unable to fetch base", "error", err.Error(), "branch", payload.Rebase.Base, "sha", payload.Rebase.Head)
+		result.SetStatusFailure(err)
+
 		return result, nil // Return result with error status, not the error itself, to match old behavior
 	}
 
 	// Perform Rebase
-	output, err := git.Rebase(ctx, payload.Path, payload.Rebase.Base)
+	out, err := git.Rebase(ctx, payload.Path, payload.Rebase.Base)
 	if err == nil {
 		// Success
 		result.SetStatusSuccess()
@@ -109,17 +111,22 @@ func (a *Branch) Rebase(ctx context.Context, payload *defs.RebasePayload) (*defs
 	}
 
 	// Rebase Failed - Check for conflicts
-	slog.Debug("rebase failed, checking conflicts", "error", err, "output", output)
+	slog.Debug("rebase failed, checking conflicts", "error", err, "output", out)
 
-	statusOut, statusErr := git.StatusPorcelain(ctx, payload.Path)
-	if statusErr != nil {
-		a.report_rebase_error(ctx, result, "rebase: failed to check status after failure", statusErr, payload.Rebase.Base, payload.Rebase.Head)
+	status, err := git.StatusPorcelain(ctx, payload.Path)
+	if err != nil {
 		_ = git.AbortRebase(ctx, payload.Path)
+
+		result.SetStatusFailure(err)
+		slog.Warn(
+			"rebase: failed to check status after failure",
+			"error", err.Error(), "branch", payload.Rebase.Base, "sha", payload.Rebase.Head,
+		)
 
 		return result, nil
 	}
 
-	conflicts := a.parseConflicts(statusOut)
+	conflicts := a.parse_conflicts(status)
 	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 		result.SetStatusConflicts()
@@ -130,7 +137,7 @@ func (a *Branch) Rebase(ctx context.Context, payload *defs.RebasePayload) (*defs
 	}
 
 	// Failure was not due to conflicts (or we couldn't detect them)
-	result.SetStatusFailure(fmt.Errorf("rebase failed: %s", output)) // Use output as error message
+	result.SetStatusFailure(fmt.Errorf("rebase failed: %s", out)) // Use output as error message
 
 	_ = git.AbortRebase(ctx, payload.Path)
 
@@ -139,11 +146,11 @@ func (a *Branch) Rebase(ctx context.Context, payload *defs.RebasePayload) (*defs
 
 // - Helpers -
 
-func (a *Branch) parseDiffOutput(nameStatus, numStat string) (*eventsv1.Diff, error) {
+func (a *Branch) parse_diff(names, stats string) (*eventsv1.Diff, error) {
 	result := &eventsv1.Diff{Files: &eventsv1.DiffFiles{}, Lines: &eventsv1.DiffLines{}}
 
 	// Parse Name Status
-	lines := strings.Split(nameStatus, "\n")
+	lines := strings.Split(names, "\n")
 	for _, line := range lines {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -172,13 +179,13 @@ func (a *Branch) parseDiffOutput(nameStatus, numStat string) (*eventsv1.Diff, er
 	}
 
 	// Parse Num Stat
-	statLines := strings.Split(numStat, "\n")
-	for _, line := range statLines {
+	stat_lines := strings.Split(stats, "\n")
+	for _, line := range stat_lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 
-		parts := strings.Fields(line) // Use Fields to handle variable whitespace
+		parts := strings.Fields(line)
 		if len(parts) < 3 {
 			continue
 		}
@@ -186,17 +193,17 @@ func (a *Branch) parseDiffOutput(nameStatus, numStat string) (*eventsv1.Diff, er
 		added, _ := strconv.Atoi(parts[0])
 		deleted, _ := strconv.Atoi(parts[1])
 
-		result.Lines.Added += int32(added)
-		result.Lines.Removed += int32(deleted)
+		result.Lines.Added += int32(added)     // nolint: gosec
+		result.Lines.Removed += int32(deleted) // nolint: gosec
 	}
 
 	return result, nil
 }
 
-func (a *Branch) parseConflicts(statusOut string) []string {
+func (a *Branch) parse_conflicts(status string) []string {
 	var conflicts []string
 
-	lines := strings.Split(statusOut, "\n")
+	lines := strings.Split(status, "\n")
 	for _, line := range lines {
 		if len(line) < 4 {
 			continue
@@ -212,11 +219,4 @@ func (a *Branch) parseConflicts(statusOut string) []string {
 	}
 
 	return conflicts
-}
-
-func (a *Branch) report_rebase_error(_ context.Context, result *defs.RebaseResult, message string, err error, base string, head string) {
-	slog.Warn(message, "error", err.Error(), "branch", base, "sha", head)
-
-	result.Status = defs.RebaseStatusFailure
-	result.Error = err.Error()
 }
