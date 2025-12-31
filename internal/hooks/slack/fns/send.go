@@ -13,7 +13,6 @@ func SendMessage(client *slack.Client, channelID string, attachment slack.Attach
 		slack.MsgOptionAttachments(attachment),
 		slack.MsgOptionAsUser(true),
 	)
-
 	if err != nil {
 		slog.Error("Error sending message to channel ", ": ", slog.Any("e", err))
 		return err

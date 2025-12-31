@@ -104,7 +104,6 @@ func (c *Config) Client() (client.Client, error) {
 				)
 			}),
 		)
-
 		if err != nil {
 			slog.Error("durable: unable to establish temporal connection.", "host", c.Host, "port", c.Port, "error", err.Error())
 

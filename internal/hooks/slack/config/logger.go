@@ -11,7 +11,7 @@ type (
 )
 
 func (l *logger) Output(calldepth int, s string) error {
-	l.Logger.Info(s)
+	l.Info(s)
 
 	return nil
 }

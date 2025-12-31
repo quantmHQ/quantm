@@ -25,6 +25,7 @@ func Run(ctx context.Context, connection *dbcfg.Config) error {
 
 	if !connection.IsConnected() {
 		_ = connection.Start(ctx)
+
 		defer func() { _ = connection.Stop(ctx) }()
 	}
 
@@ -40,7 +41,6 @@ func Run(ctx context.Context, connection *dbcfg.Config) error {
 		dir,
 		connection.ConnectionURI(),
 	)
-
 	if err != nil {
 		slog.Error("migrations: unable to read data ...", "error", err.Error())
 		return err

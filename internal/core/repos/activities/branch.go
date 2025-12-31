@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
-
-	git "github.com/jeffwelling/git2go/v37"
+	"strconv"
+	"strings"
 
 	"go.breu.io/quantm/internal/core/kernel"
 	"go.breu.io/quantm/internal/core/repos/defs"
-	"go.breu.io/quantm/internal/core/repos/fns"
+	"go.breu.io/quantm/internal/core/repos/git"
 	eventsv1 "go.breu.io/quantm/internal/proto/ctrlplane/events/v1"
 )
 
@@ -27,25 +26,19 @@ func (a *Branch) Clone(ctx context.Context, payload *defs.ClonePayload) (string,
 		return "", err
 	}
 
-	opts := &git.CloneOptions{
-		CheckoutOptions: git.CheckoutOptions{
-			Strategy:    git.CheckoutSafe,
-			NotifyFlags: git.CheckoutNotifyAll,
-		},
-		CheckoutBranch: payload.Branch,
-	}
-
 	path := fmt.Sprintf("/tmp/%s", payload.Path)
 
-	cloned, err := git.Clone(url, path, opts)
-	if err != nil {
+	// Ensure parent directory exists (though /tmp usually does)
+	if err := os.MkdirAll("/tmp", 0755); err != nil {
+		return "", fmt.Errorf("failed to create temp dir: %w", err)
+	}
+
+	if _, err := git.Clone(ctx, path, url, payload.Branch); err != nil {
 		slog.Warn("clone: failed", "error", err, "url", url, "path", path)
 		return "", err
 	}
 
-	defer cloned.Free()
-
-	return cloned.Workdir(), nil
+	return path, nil
 }
 
 // RemoveDir removes a directory and handles potential errors.
@@ -59,464 +52,171 @@ func (a *Branch) RemoveDir(ctx context.Context, path string) error {
 	return nil
 }
 
-// Diff computes the diff between two commits using git2go.
+// Diff computes the diff between two commits using git CLI.
 func (a *Branch) Diff(ctx context.Context, payload *defs.DiffPayload) (*eventsv1.Diff, error) {
-	repo, err := git.OpenRepository(payload.Path)
+	// Ensure base and head exist
+	if _, err := git.RevParse(ctx, payload.Path, payload.Base); err != nil {
+		slog.Warn("diff: unable to resolve base", "base", payload.Base, "error", err)
+		return nil, err
+	}
+
+	if _, err := git.RevParse(ctx, payload.Path, payload.SHA); err != nil {
+		slog.Warn("diff: unable to resolve head", "head", payload.SHA, "error", err)
+		return nil, err
+	}
+
+	// Fetch latest origin to ensure we have the refs (CLI equivalent of refresh_remote)
+	if _, err := git.Fetch(ctx, payload.Path, payload.Base); err != nil {
+		slog.Warn("diff: unable to fetch base", "base", payload.Base, "error", err)
+		// Proceeding anyway as local refs might be sufficient
+	}
+
+	// 1. Get File Status (Added, Modified, Deleted, Renamed)
+	names, err := git.DiffStatus(ctx, payload.Path, payload.Base, payload.SHA)
 	if err != nil {
-		slog.Warn("diff: unable to open repository", "error", err, "path", payload.Path)
+		slog.Warn("diff: failed to get name-status", "error", err)
 		return nil, err
 	}
 
-	defer repo.Free()
-
-	if err := a.refresh_remote(ctx, repo, payload.Base); err != nil {
-		slog.Warn("diff: unable to refresh remote", "path", payload.Path, "error", err.Error())
-		return nil, err
-	}
-
-	base, err := a.tree_from_branch(ctx, repo, payload.Base)
+	// 2. Get Line Stats (Insertions, Deletions)
+	stats, err := git.DiffStat(ctx, payload.Path, payload.Base, payload.SHA)
 	if err != nil {
-		slog.Warn("diff: unable to process base", "base", payload.Base, "error", err)
+		slog.Warn("diff: failed to get numstat", "error", err)
 		return nil, err
 	}
 
-	defer base.Free()
-
-	head, err := a.tree_from_sha(ctx, repo, payload.SHA)
-	if err != nil {
-		slog.Warn("diff: unable to process head", "head", payload.SHA, "error", err)
-		return nil, err
-	}
-
-	defer head.Free()
-
-	opts, _ := git.DefaultDiffOptions()
-
-	diff, err := repo.DiffTreeToTree(base, head, &opts)
-	if err != nil {
-		slog.Warn("Failed to create diff", "error", err, "base", base, "head", head)
-		return nil, err
-	}
-
-	defer func() { _ = diff.Free() }()
-
-	return a.diff_to_result(ctx, diff)
+	return a.parse_diff(names, stats)
 }
 
 // Rebase performs a git rebase operation. Handles conflicts and returns result.
 func (a *Branch) Rebase(ctx context.Context, payload *defs.RebasePayload) (*defs.RebaseResult, error) {
 	result := defs.NewRebaseResult()
 
-	repo, err := git.OpenRepository(payload.Path)
+	// Ensure remote is up to date
+	if _, err := git.Fetch(ctx, payload.Path, payload.Rebase.Base); err != nil {
+		slog.Warn("rebase: unable to fetch base", "error", err.Error(), "branch", payload.Rebase.Base, "sha", payload.Rebase.Head)
+		result.SetStatusFailure(err)
+
+		return result, nil // Return result with error status, not the error itself, to match old behavior
+	}
+
+	// Perform Rebase
+	out, err := git.Rebase(ctx, payload.Path, payload.Rebase.Base)
+	if err == nil {
+		// Success
+		result.SetStatusSuccess()
+		result.Head = payload.Rebase.Head
+
+		return result, nil
+	}
+
+	// Rebase Failed - Check for conflicts
+	slog.Debug("rebase failed, checking conflicts", "error", err, "output", out)
+
+	status, err := git.StatusPorcelain(ctx, payload.Path)
 	if err != nil {
-		a.report_rebase_error(ctx, result, "rebase: failed to open repository", err, payload.Rebase.Base, payload.Rebase.Head)
-		return result, err
-	}
+		_ = git.AbortRebase(ctx, payload.Path)
 
-	defer repo.Free()
-
-	if err := a.refresh_remote(ctx, repo, payload.Rebase.Base); err != nil {
-		a.report_rebase_error(
-			ctx, result,
-			"rebase: unable to refresh remote", err, payload.Rebase.Base, payload.Rebase.Head,
-		)
-
-		return result, nil
-	}
-
-	branch, upstream, err := a.get_annotated_commits(ctx, repo, payload.Rebase.Base, payload.Rebase.Head)
-	if err != nil {
-		a.report_rebase_error(
-			ctx, result,
-			"rebase: failed to get annotated commits", err, payload.Rebase.Base, payload.Rebase.Head,
-		)
-
-		return result, nil
-	}
-
-	defer branch.Free()
-	defer upstream.Free()
-
-	opts, err := git.DefaultRebaseOptions()
-	if err != nil {
-		a.report_rebase_error(
-			ctx, result,
-			"rebase: failed to get default rebase options", err, payload.Rebase.Base, payload.Rebase.Head,
-		)
-
-		result.Error = fmt.Sprintf("Failed to get default rebase options: %v", err)
-
-		return result, nil
-	}
-
-	rebase, err := repo.InitRebase(branch, upstream, nil, &opts)
-	if err != nil {
-		a.report_rebase_error(
-			ctx, result,
-			"rebase: failed to initialize rebase", err, payload.Rebase.Base, payload.Rebase.Head,
-		)
-
-		result.Error = fmt.Sprintf("Failed to initialize rebase: %v", err)
-
-		return result, nil
-	}
-
-	defer rebase.Free()
-
-	result.TotalCommits = rebase.OperationCount()
-
-	if err := a.rebase_each(ctx, repo, rebase, result); err != nil {
-		a.report_rebase_error(
-			ctx, result,
-			"rebase: unable to rebase", err, payload.Rebase.Base, payload.Rebase.Head,
-		)
-
-		return result, nil
-	}
-
-	if err := rebase.Finish(); err != nil {
+		result.SetStatusFailure(err)
 		slog.Warn(
-			"rebase: unable to finish",
-			"error", err.Error(),
-			"branch", payload.Rebase.Base, "sha", payload.Rebase.Head,
+			"rebase: failed to check status after failure",
+			"error", err.Error(), "branch", payload.Rebase.Base, "sha", payload.Rebase.Head,
 		)
 
 		return result, nil
 	}
 
-	return result, nil
-}
-
-// - Diff Helpers -
-// diff_to_result converts a git.Diff to a DiffResult.
-func (a *Branch) diff_to_result(_ context.Context, diff *git.Diff) (*eventsv1.Diff, error) {
-	result := &eventsv1.Diff{Files: &eventsv1.DiffFiles{}, Lines: &eventsv1.DiffLines{}}
-	deltas, err := diff.NumDeltas()
-
-	if err != nil {
-		slog.Warn("Failed to get number of deltas", "error", err)
-		return nil, err
-	}
-
-	// use a sync.Map for concurrent safe updates
-	var mutex sync.Mutex
-
-	// use a go routine to handle diff deltas in parallel
-	var wg sync.WaitGroup
-
-	wg.Add(deltas)
-
-	for idx := 0; idx < deltas; idx++ {
-		go func(i int) {
-			defer wg.Done()
-
-			delta, _ := diff.Delta(i)
-
-			mutex.Lock()
-			defer mutex.Unlock()
-
-			switch delta.Status { // nolint:exhaustive
-			case git.DeltaAdded:
-				result.Files.Added = append(result.Files.Added, delta.NewFile.Path)
-			case git.DeltaDeleted:
-				result.Files.Deleted = append(result.Files.Deleted, delta.OldFile.Path)
-			case git.DeltaModified:
-				result.Files.Modified = append(result.Files.Modified, delta.NewFile.Path)
-			case git.DeltaRenamed:
-				result.Files.Renamed = append(result.Files.Renamed, &eventsv1.RenamedFile{Old: delta.OldFile.Path, New: delta.NewFile.Path})
-			}
-		}(idx)
-	}
-
-	wg.Wait()
-
-	stats, err := diff.Stats()
-	if err != nil {
-		return nil, err
-	}
-
-	defer func() { _ = stats.Free() }()
-
-	result.Lines.Added = int32(stats.Insertions())  // nolint:gosec
-	result.Lines.Removed = int32(stats.Deletions()) // nolint:gosec
-
-	return result, nil
-}
-
-// tree_from_branch gets the tree from a branch ref.
-func (a *Branch) tree_from_branch(_ context.Context, repo *git.Repository, branch string) (*git.Tree, error) {
-	ref, err := repo.References.Lookup(fns.BranchNameToRef(branch))
-	if err != nil {
-		slog.Warn("Failed to lookup ref", "error", err, "branch", branch)
-		return nil, err
-	}
-
-	defer ref.Free()
-
-	commit, err := repo.LookupCommit(ref.Target())
-	if err != nil {
-		slog.Warn("Failed to lookup commit", "error", err, "target", ref.Target())
-		return nil, err
-	}
-
-	defer commit.Free()
-
-	tree, err := commit.Tree()
-	if err != nil {
-		slog.Warn("Failed to lookup tree", "error", err)
-		return nil, err
-	}
-
-	return tree, nil
-}
-
-// tree_from_sha gets the tree from a commit SHA.
-func (a *Branch) tree_from_sha(_ context.Context, repo *git.Repository, sha string) (*git.Tree, error) {
-	oid, err := git.NewOid(sha)
-	if err != nil {
-		slog.Warn("Invalid SHA", "error", err, "sha", sha)
-		return nil, err
-	}
-
-	commit, err := repo.LookupCommit(oid)
-	if err != nil {
-		slog.Warn("Failed to lookup commit", "error", err, "oid", oid)
-		return nil, err
-	}
-
-	defer commit.Free()
-
-	tree, err := commit.Tree()
-	if err != nil {
-		slog.Warn("Failed to lookup tree", "error", err)
-		return nil, err
-	}
-
-	return tree, nil
-}
-
-// - Rebase Helpers -
-
-// get_annotated_commits retrieves annotated commits for the base and head of a rebase operation.
-func (a *Branch) get_annotated_commits(
-	ctx context.Context, repo *git.Repository, base string, head string,
-) (*git.AnnotatedCommit, *git.AnnotatedCommit, error) {
-	branch, err := a.annotated_commit_from_ref(ctx, repo, base)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get annotated commit from ref: %w", err)
-	}
-
-	upstream, err := a.annotated_commit_from_oid(ctx, repo, head)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get annotated commit from sha: %w", err)
-	}
-
-	return branch, upstream, nil
-}
-
-// annotated_commit_from_ref retrieves an annotated commit from a ref.
-func (a *Branch) annotated_commit_from_ref(_ context.Context, repo *git.Repository, branch string) (*git.AnnotatedCommit, error) {
-	ref, err := repo.References.Lookup(fns.BranchNameToRef(branch))
-	if err != nil {
-		slog.Warn("Failed to lookup ref", "error", err, "branch", branch)
-		return nil, err
-	}
-
-	defer ref.Free()
-
-	commit, err := repo.LookupAnnotatedCommit(ref.Target())
-	if err != nil {
-		slog.Warn("Failed to lookup base commit", "error", err, "target", ref.Target())
-		return nil, err
-	}
-
-	return commit, nil
-}
-
-// annotated_commit_from_oid retrieves an annotated commit from an OID.
-func (a *Branch) annotated_commit_from_oid(_ context.Context, repo *git.Repository, sha string) (*git.AnnotatedCommit, error) {
-	id, err := git.NewOid(sha)
-	if err != nil {
-		slog.Warn("Invalid head SHA", "error", err, "sha", sha)
-		return nil, err
-	}
-
-	commit, err := repo.LookupAnnotatedCommit(id)
-	if err != nil {
-		slog.Warn("Failed to lookup head commit", "error", err, "id", id)
-		return nil, err
-	}
-
-	return commit, nil
-}
-
-// rebase_each iterates over a rebase operation, processing each commit.
-func (a *Branch) rebase_each(ctx context.Context, repo *git.Repository, rebase *git.Rebase, result *defs.RebaseResult) error {
-	for {
-		op, err := rebase.Next()
-		if err != nil {
-			if git.IsErrorCode(err, git.ErrorCodeIterOver) {
-				result.SetStatusSuccess()
-
-				break
-			}
-
-			a.rebase_abort(ctx, rebase)
-
-			return err
-		}
-
-		if err := a.rebase_op(ctx, repo, rebase, op, result); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// rebase_op processes a rebase operation.
-func (a *Branch) rebase_op(
-	ctx context.Context, repo *git.Repository, rebase *git.Rebase, op *git.RebaseOperation, result *defs.RebaseResult,
-) error {
-	commit, err := repo.LookupCommit(op.Id)
-	if err != nil {
-		result.AddOperation(op.Type, defs.RebaseStatusFailure, "", commit.Message(), err)
-		result.SetStatusFailure(err)
-		a.rebase_abort(ctx, rebase)
-
-		return err
-	}
-
-	defer commit.Free()
-
-	slog.Debug("processing commit", "id", commit.Id().String())
-
-	idx, err := repo.Index()
-	if err != nil {
-		result.AddOperation(op.Type, defs.RebaseStatusFailure, commit.Id().String(), commit.Message(), err)
-		result.SetStatusFailure(err)
-
-		a.rebase_abort(ctx, rebase)
-
-		return err
-	}
-	defer idx.Free()
-
-	conflicts, err := a.get_conflicts(ctx, idx)
-	if err != nil {
-		result.AddOperation(op.Type, defs.RebaseStatusFailure, commit.Id().String(), commit.Message(), err)
-		result.SetStatusFailure(err)
-		a.rebase_abort(ctx, rebase)
-
-		return err
-	} else if len(conflicts) > 0 {
+	conflicts := a.parse_conflicts(status)
+	if len(conflicts) > 0 {
 		result.Conflicts = conflicts
 		result.SetStatusConflicts()
-		result.AddOperation(op.Type, defs.RebaseStatusFailure, commit.Id().String(), commit.Message(), nil)
+		// Abort to clean up
+		_ = git.AbortRebase(ctx, payload.Path)
 
-		a.rebase_abort(ctx, rebase)
-
-		return nil
+		return result, nil
 	}
 
-	err = rebase.Commit(commit.Id(), commit.Author(), commit.Committer(), commit.Message())
-	if err != nil {
-		result.AddOperation(op.Type, defs.RebaseStatusFailure, commit.Id().String(), commit.Message(), err)
-		result.SetStatusFailure(err)
+	// Failure was not due to conflicts (or we couldn't detect them)
+	result.SetStatusFailure(fmt.Errorf("rebase failed: %s", out)) // Use output as error message
 
-		a.rebase_abort(ctx, rebase)
+	_ = git.AbortRebase(ctx, payload.Path)
 
-		return err
-	}
-
-	slog.Debug("commit processed", "id", commit.Id().String())
-	result.Head = commit.Id().String()
-	result.AddOperation(op.Type, defs.RebaseStatusSuccess, commit.Id().String(), commit.Message(), nil)
-	result.SetStatusSuccess()
-
-	return nil
+	return result, nil
 }
 
-// rebase_abort aborts a git rebase operation if it's not nil.  Logs a warning if the abort fails.
-func (a *Branch) rebase_abort(_ context.Context, rebase *git.Rebase) {
-	slog.Debug("aborting rebase")
+// - Helpers -
 
-	if rebase != nil {
-		if err := rebase.Abort(); err != nil {
-			slog.Warn("rebase: unable to abort!", "error", err.Error())
+func (a *Branch) parse_diff(names, stats string) (*eventsv1.Diff, error) {
+	result := &eventsv1.Diff{Files: &eventsv1.DiffFiles{}, Lines: &eventsv1.DiffLines{}}
+
+	// Parse Name Status
+	lines := strings.Split(names, "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
-	}
-}
 
-// get_conflicts retrieves conflict information from a git index. Returns an empty slice if no conflicts are found.
-func (a *Branch) get_conflicts(_ context.Context, idx *git.Index) ([]string, error) {
-	conflicts := make([]string, 0)
+		parts := strings.Split(line, "\t")
+		if len(parts) < 2 {
+			continue
+		}
 
-	if idx == nil {
-		return conflicts, nil
-	}
+		status := parts[0]
+		path := parts[1]
 
-	if !idx.HasConflicts() {
-		return conflicts, nil
-	}
-
-	iter, err := idx.ConflictIterator()
-	if err != nil {
-		slog.Warn("Failed to create conflict iterator", "error", err)
-		return conflicts, fmt.Errorf("failed to create conflict iterator: %w", err)
-	}
-
-	defer iter.Free()
-
-	for {
-		entry, err := iter.Next()
-		if err != nil {
-			if git.IsErrorCode(err, git.ErrorCodeIterOver) {
-				break
+		switch {
+		case strings.HasPrefix(status, "A"):
+			result.Files.Added = append(result.Files.Added, path)
+		case strings.HasPrefix(status, "D"):
+			result.Files.Deleted = append(result.Files.Deleted, path)
+		case strings.HasPrefix(status, "M"):
+			result.Files.Modified = append(result.Files.Modified, path)
+		case strings.HasPrefix(status, "R"):
+			if len(parts) >= 3 {
+				result.Files.Renamed = append(result.Files.Renamed, &eventsv1.RenamedFile{Old: parts[1], New: parts[2]})
 			}
+		}
+	}
 
-			slog.Warn("Failed to get next conflict entry", "error", err)
-
-			return conflicts, fmt.Errorf("failed to get next conflict entry: %w", err)
+	// Parse Num Stat
+	stat_lines := strings.Split(stats, "\n")
+	for _, line := range stat_lines {
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
 
-		conflicts = append(conflicts, entry.Ancestor.Path)
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+
+		added, _ := strconv.Atoi(parts[0])
+		deleted, _ := strconv.Atoi(parts[1])
+
+		result.Lines.Added += int32(added)     // nolint: gosec
+		result.Lines.Removed += int32(deleted) // nolint: gosec
 	}
 
-	return conflicts, nil
+	return result, nil
 }
 
-// report_rebase_error logs a rebase error and updates the rebase result.
-func (a *Branch) report_rebase_error(_ context.Context, result *defs.RebaseResult, message string, err error, base string, head string) {
-	slog.Warn(message, "error", err.Error(), "branch", base, "sha", head)
+func (a *Branch) parse_conflicts(status string) []string {
+	var conflicts []string
 
-	result.Status = defs.RebaseStatusFailure
-	result.Error = err.Error()
-}
+	lines := strings.Split(status, "\n")
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		// Porcelain format: XY PATH
+		// Unmerged states: DD, AU, UD, UA, DU, AA, UU
+		code := line[:2]
+		path := strings.TrimSpace(line[3:])
 
-// - Git Helpers -
-
-// refresh_remote fetches a branch from the "origin" remote.
-func (a *Branch) refresh_remote(_ context.Context, repo *git.Repository, branch string) error {
-	remote, err := repo.Remotes.Lookup("origin")
-	if err != nil {
-		return err
+		if code == "UU" || code == "AA" || code == "DU" || code == "UD" || code == "UA" || code == "AU" || code == "DD" {
+			conflicts = append(conflicts, path)
+		}
 	}
 
-	if err := remote.Fetch([]string{fns.BranchNameToRef(branch)}, &git.FetchOptions{}, ""); err != nil {
-		return err
-	}
-
-	ref, err := repo.References.Lookup(fns.BranchNameToRemoteRef("origin", branch))
-	if err != nil {
-		return err
-	}
-	defer ref.Free()
-
-	_, err = repo.References.Create(fns.BranchNameToRef(branch), ref.Target(), true, "")
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return conflicts
 }
