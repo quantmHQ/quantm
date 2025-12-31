@@ -128,7 +128,6 @@ func (c *Config) Start(ctx context.Context) error {
 			)
 		}),
 	)
-
 	if err != nil {
 		return erratic.NewSystemError(erratic.CommonModule).Wrap(err)
 	}

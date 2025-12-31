@@ -131,7 +131,7 @@ func ConflictHead() slack.AttachmentField {
 func AffectedFiles() slack.AttachmentField {
 	return slack.AttachmentField{
 		Title: "Affected Files",
-		Value: fmt.Sprintf("%s", ""), // nolint: gosimple
+		Value: "", // nolint: gosimple
 		Short: false,
 	}
 }

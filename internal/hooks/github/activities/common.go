@@ -56,7 +56,6 @@ func HydrateRepoEvent(ctx context.Context, payload *defs.HydratedRepoEventPayloa
 		parent, err := durable.
 			OnCore().
 			QueryWorkflow(ctx, hydrated.RepoWorkflowOptions(), repos.QueryRepoForEventParent, payload.Branch)
-
 		if err == nil {
 			_ = parent.Get(&hydrated.ParentID)
 		}
@@ -80,7 +79,6 @@ func AddRepo(ctx context.Context, payload *defs.SyncRepoPayload) error {
 		InstallationID: payload.InstallationID,
 		GithubID:       payload.Repo.ID,
 	})
-
 	if err == nil {
 		return qtx.ActivateGithubRepo(ctx, repo.ID)
 	}
@@ -129,7 +127,6 @@ func SuspendRepo(ctx context.Context, payload *defs.SyncRepoPayload) error {
 				GithubID:       payload.Repo.ID,
 			},
 		)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil

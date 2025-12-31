@@ -71,6 +71,7 @@ func (s *EncryptedFieldTestSuite) TestEncryptDecrypt() {
 
 	// Decrypt the string
 	var decrypted Sensitive
+
 	err = decrypted.from(encrypted)
 	s.NoError(err)
 
@@ -84,6 +85,7 @@ func (s *EncryptedFieldTestSuite) TestMarshalJSON() {
 
 	// Unmarshal the JSON data
 	var decrypted Sensitive
+
 	err = json.Unmarshal(data, &decrypted)
 	s.NoError(err)
 
@@ -97,6 +99,7 @@ func (s *EncryptedFieldTestSuite) TestMarshalCQL() {
 
 	// Unmarshal the CQL data
 	var decrypted Sensitive
+
 	err = decrypted.UnmarshalCQL(cql)
 	s.NoError(err)
 

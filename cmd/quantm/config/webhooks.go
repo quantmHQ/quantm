@@ -31,7 +31,7 @@ func (w *WebhookService) Start(ctx context.Context) error {
 }
 
 func (w *WebhookService) Stop(ctx context.Context) error {
-	return w.Echo.Shutdown(ctx)
+	return w.Shutdown(ctx)
 }
 
 func NewWebhookServer() *WebhookService {

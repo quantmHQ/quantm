@@ -1,8 +1,6 @@
 package defs
 
 import (
-	git "github.com/jeffwelling/git2go/v37"
-
 	eventsv1 "go.breu.io/quantm/internal/proto/ctrlplane/events/v1"
 )
 
@@ -50,16 +48,6 @@ const (
 	RebaseOperationKindFixup  RebaseOperationKind = "fixup"
 )
 
-var (
-	gitOpTypeMap = map[git.RebaseOperationType]RebaseOperationKind{
-		git.RebaseOperationPick:   RebaseOperationKindPick,
-		git.RebaseOperationReword: RebaseOperationKindReword,
-		git.RebaseOperationEdit:   RebaseOperationKindEdit,
-		git.RebaseOperationSquash: RebaseOperationKindSquash,
-		git.RebaseOperationFixup:  RebaseOperationKindFixup,
-	}
-)
-
 func (r *RebaseResult) HasConflicts() bool {
 	return len(r.Conflicts) > 0
 }
@@ -68,7 +56,7 @@ func (r *RebaseResult) AppliedCommit() int {
 	return len(r.Operations)
 }
 
-func (r *RebaseResult) AddOperation(op git.RebaseOperationType, status RebaseStatus, head, message string, err error) {
+func (r *RebaseResult) AddOperation(op RebaseOperationKind, status RebaseStatus, head, message string, err error) {
 	err_ := ""
 
 	if err != nil {
@@ -79,7 +67,7 @@ func (r *RebaseResult) AddOperation(op git.RebaseOperationType, status RebaseSta
 	r.Operations = append(
 		r.Operations,
 		RebaseOperation{
-			Kind:    gitOpTypeMap[op],
+			Kind:    op,
 			Status:  status,
 			Head:    head,
 			Message: message,

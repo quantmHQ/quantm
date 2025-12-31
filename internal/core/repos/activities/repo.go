@@ -20,10 +20,10 @@ const (
 // ForwardToBranch sends a signal to a branch workflow, starting it if it doesn't exist.
 func (a *Repo) ForwardToBranch(ctx context.Context, payload *defs.SignalBranchPayload, event, state any) error {
 	id := defs.BranchWorkflowOptions(payload.Repo, payload.Branch)
+
 	run, err := durable.
 		OnCore().
 		SignalWithStartWorkflow(ctx, id, payload.Signal, event, WorkflowBranch, state)
-
 	if err != nil {
 		slog.Warn("fwd_to_branch: unable to signal", "id", id.IDSuffix(), "error", err.Error())
 	} else {

@@ -11,11 +11,7 @@ type (
 )
 
 func NewHints(args ...string) Hints {
-	odd := false
-
-	if len(args)%2 != 0 {
-		odd = true
-	}
+	odd := len(args)%2 != 0
 
 	details := make(Hints)
 

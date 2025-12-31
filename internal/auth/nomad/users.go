@@ -50,8 +50,8 @@ func (s *UserService) CreateUser(
 	// User sign-up without an organization domain.
 	if domain == "" {
 		params.OrgID = NoOrgUUID
-		user, err := qtx.CreateUser(ctx, params)
 
+		user, err := qtx.CreateUser(ctx, params)
 		if err != nil {
 			return nil, erratic.NewDatabaseError(erratic.AuthModule).Wrap(err)
 		}

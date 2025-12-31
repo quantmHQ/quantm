@@ -40,6 +40,7 @@ type (
 func (p *Pool) add(ctx workflow.Context, resourceID string, timeout time.Duration) {
 	_ = p.mutex.Lock(ctx)
 	defer p.mutex.Unlock()
+
 	p.Data[resourceID] = timeout
 }
 
@@ -48,6 +49,7 @@ func (p *Pool) add(ctx workflow.Context, resourceID string, timeout time.Duratio
 func (p *Pool) remove(ctx workflow.Context, resourceID string) {
 	_ = p.mutex.Lock(ctx)
 	defer p.mutex.Unlock()
+
 	delete(p.Data, resourceID)
 }
 
