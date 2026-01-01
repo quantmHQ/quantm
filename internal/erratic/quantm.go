@@ -1,8 +1,11 @@
 package erratic
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 
 	"connectrpc.com/connect"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -25,7 +28,8 @@ type (
 		Message string `json:"message"` // Human-readable message describing the error.
 		Hints   Hints  `json:"hints"`   // Additional information about the error.
 
-		internal error // internal error, if any.
+		frame    *runtime.Frame // Stack frame where the error was created.
+		internal error          // internal error, if any.
 	}
 )
 
@@ -46,6 +50,71 @@ func (e *QuantmError) Unwrap() error {
 	return e.internal
 }
 
+// LogValue implements the slog.LogValuer interface.
+//
+// It serializes the Error into a structured slog.Value, allowing for
+// recursive serialization of nested erratic.Error instances.
+func (e *QuantmError) LogValue() slog.Value {
+	var chain []slog.Value
+
+	for err := error(e); err != nil; err = errors.Unwrap(err) {
+		var entry slog.Value
+
+		switch ee := err.(type) {
+		case *QuantmError:
+			// Build the trace object. The spec requires it to be an array with one element.
+			var trace []slog.Value
+			if ee.frame != nil {
+				trace = []slog.Value{
+					slog.GroupValue(
+						slog.String("func", ee.frame.Function),
+						slog.Int("line", ee.frame.Line),
+						slog.String("source", ee.frame.File),
+					),
+				}
+			}
+
+			attrs := []slog.Attr{
+				slog.String("msg", ee.Message),
+			}
+
+			if len(trace) > 0 {
+				attrs = append(attrs, slog.Any("trace", trace))
+			}
+
+			if len(ee.Hints) > 0 {
+				attrs = append(attrs, slog.Any("hints", ee.Hints))
+			}
+
+			entry = slog.GroupValue(attrs...)
+
+		default:
+			entry = slog.GroupValue(slog.String("msg", err.Error()))
+		}
+
+		chain = append(chain, entry)
+	}
+
+	attrs := []slog.Attr{
+		slog.String("msg", e.Message),
+		slog.Any("chain", chain),
+	}
+
+	return slog.GroupValue(attrs...)
+}
+
+// Log logs the Error using the slog package at the Error level.
+func (e *QuantmError) Log(attrs ...any) {
+	attrs = append(attrs, slog.Any("error", e))
+	slog.Error(e.Message, attrs...)
+}
+
+// Warn logs the Error using the slog package at the Warn level.
+func (e *QuantmError) Warn(attrs ...any) {
+	attrs = append(attrs, slog.Any("error", e))
+	slog.Warn(e.Message, attrs...)
+}
+
 // SetHintsWith sets the ErrorDetails field of the APIError.
 func (e *QuantmError) SetHintsWith(hints Hints) *QuantmError {
 	if e.Hints == nil {
@@ -60,7 +129,7 @@ func (e *QuantmError) SetHintsWith(hints Hints) *QuantmError {
 }
 
 // AddHint adds a key-value pair to the ErrorDetails field of the APIError.
-func (e *QuantmError) AddHint(key, value string) *QuantmError {
+func (e *QuantmError) AddHint(key string, value any) *QuantmError {
 	if e.Hints == nil {
 		e.Hints = make(Hints)
 	}
@@ -106,7 +175,7 @@ func (e *QuantmError) WithStack(stack string) *QuantmError {
 }
 
 // WithHint adds a hint to the error.
-func (e *QuantmError) WithHint(key, value string) *QuantmError {
+func (e *QuantmError) WithHint(key string, value any) *QuantmError {
 	if e.Hints == nil {
 		e.Hints = make(Hints)
 	}
@@ -151,7 +220,7 @@ func (e *QuantmError) ToProto() *status.Status {
 	}
 
 	for key, val := range e.Hints {
-		info.Metadata[key] = val
+		info.Metadata[key] = fmt.Sprintf("%v", val)
 	}
 
 	anyinfo, err := anypb.New(info)
@@ -163,7 +232,7 @@ func (e *QuantmError) ToProto() *status.Status {
 
 	if stack, ok := e.Hints["stack"]; ok {
 		trace := &errdetails.DebugInfo{
-			StackEntries: []string{stack},
+			StackEntries: []string{fmt.Sprint(stack)},
 			Detail:       "See stack entries for internal details.",
 		}
 
@@ -192,7 +261,7 @@ func (e *QuantmError) ToConnectError() *connect.Error {
 	err := connect.NewError(code, e)
 
 	for key, val := range e.Hints {
-		err.Meta().Add(key, val)
+		err.Meta().Add(key, fmt.Sprintf("%v", val))
 	}
 
 	return err
@@ -212,10 +281,34 @@ func (e *QuantmError) ToConnectError() *connect.Error {
 // The function receives an error code, a human-readable message, and optional key-value pairs for additional
 // information.
 func New(module, code int, message string, fields ...string) *QuantmError {
-	return &QuantmError{
+	e := &QuantmError{
 		ID:      utils.Idempotent(),
 		Code:    compose(module, code),
 		Message: message,
 		Hints:   NewHints(fields...),
 	}
+
+	// Capture stack frame
+	pcs := make([]uintptr, 32)
+	// Skip runtime.Callers and New
+	n := runtime.Callers(2, pcs)
+	if n > 0 {
+		frames := runtime.CallersFrames(pcs[:n])
+		for {
+			frame, more := frames.Next()
+			// If the package is not internal/erratic, this is our caller.
+			// We check if the file path contains "internal/erratic/".
+			// This is a heuristic, but efficient.
+			if !strings.Contains(frame.File, "internal/erratic/") {
+				e.frame = &frame
+				break
+			}
+
+			if !more {
+				break
+			}
+		}
+	}
+
+	return e
 }

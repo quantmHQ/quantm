@@ -6,16 +6,21 @@ type (
 	// Example:
 	//
 	//  info := Hints{"field": "invalid value"}
-	//  fmt.Println(info) // Output: map[string]string{"field": "invalid value"}
-	Hints map[string]string
+	//  fmt.Println(info) // Output: map[string]any{"field": "invalid value"}
+	Hints map[string]any
 )
 
 func NewHints(args ...string) Hints {
 	odd := len(args)%2 != 0
 
+	limit := len(args)
+	if odd {
+		limit--
+	}
+
 	details := make(Hints)
 
-	for i := 0; i < len(args); i += 2 {
+	for i := 0; i < limit; i += 2 {
 		details[args[i]] = args[i+1]
 	}
 
