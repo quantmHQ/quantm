@@ -46,8 +46,8 @@ var (
 		Host:      "localhost",
 		Name:      "ctrlplane",
 		Port:      5432,
-		User:      "postgres",
-		Password:  "postgres",
+		User:      "ctrlplane",
+		Password:  "ctrlplane",
 		EnableSSL: false,
 	}
 )

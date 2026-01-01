@@ -9,49 +9,16 @@ services:
 
   # temporal.io
 
-  temporal-db:
-    container_name: temporal-db
-    image: postgres:16
-    environment:
-      POSTGRES_USER: ${TEMPORAL__DB_USER}
-      POSTGRES_PASSWORD: ${TEMPORAL__DB_PASS}
-      POSTGRES_DB: ${TEMPORAL__DB_NAME}
-    volumes:
-      - temporal-db-data:/var/lib/postgresql/data
-    networks:
-      - ctrlplane
-
   temporal:
-    container_name: temporal
-    depends_on:
-      - temporal-db
-    environment:
-      # https://github.com/temporalio/temporal/blob/main/docker/config_template.yaml#L102
-      DB: postgres12_pgx
-      DBNAME: ${TEMPORAL__DB_NAME}
-      DB_PORT: 5432
-      POSTGRES_USER: ${TEMPORAL__DB_USER}
-      POSTGRES_PWD: ${TEMPORAL__DB_PASS}
-      POSTGRES_SEEDS: temporal-db
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development.yaml
-    image: temporalio/auto-setup:1.25.1
+    image: temporalio/temporal:1.5.1
     ports:
-      - 7233:7233
+      # Port 7233 is for the Temporal gRPC frontend. Your workers and clients will connect to this.
+      - "7233:7233"
+      # Port 8233 is for the Temporal Web UI.
+      - "8233:8233"
+    command: server start-dev --ip 0.0.0.0 --db-filename /home/temporal/temporal.db
     volumes:
-      - ./tools/temporal/dynamicconfig/:/etc/temporal/config/dynamicconfig/
-    networks:
-      - ctrlplane
-
-  temporal-ui:
-    container_name: temporal-ui
-    depends_on:
-      - temporal
-    environment:
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:3000
-    image: temporalio/ui:2.33.0
-    ports:
-      - 8080:8080
+      - temporal-data:/home/temporal
     networks:
       - ctrlplane
 
@@ -63,10 +30,10 @@ services:
     container_name: clickhouse
     image: clickhouse/clickhouse-server:24.8
     environment:
-      CLICKHOUSE_DB: ${PULSE__NAME}
+      CLICKHOUSE_DB: ${PULSE__NAME:-pulse}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
-      CLICKHOUSE_USER: ${PULSE__USER}
-      CLICKHOUSE_PASSWORD: ${PULSE__PASS}
+      CLICKHOUSE_USER: ${PULSE__USER:-pulse}
+      CLICKHOUSE_PASSWORD: ${PULSE__PASS:-pulse}
     ports:
       - "8123:8123" # why do we need http port?
       - "9000:9000"
@@ -87,9 +54,9 @@ services:
     ports:
       - 5432:5432
     environment:
-      POSTGRES_USER: ${DB__USER}
-      POSTGRES_PASSWORD: ${DB__PASS}
-      POSTGRES_DB: ${DB__NAME}
+      POSTGRES_USER: ${DB__USER:-ctrlplane}
+      POSTGRES_PASSWORD: ${DB__PASS:-ctrlplane}
+      POSTGRES_DB: ${DB__NAME:-ctrlplane}
     volumes:
       - ctrlplane-db-data:/var/lib/postgresql/data
     command: ["postgres", "-c", "log_statement=all"]
@@ -104,8 +71,7 @@ networks:
   ctrlplane: {}
 
 volumes:
-  temporal-db-data: {}
-  questdb-data: {}
+  temporal-data: {}
   clickhouse-data: {}
   clickhouse-logs: {}
   ctrlplane-db-data: {}
