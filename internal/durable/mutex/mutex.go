@@ -20,18 +20,62 @@
 package mutex
 
 import (
+	"time"
+
 	"go.breu.io/durex/dispatch"
+	"go.breu.io/durex/queues"
 	"go.temporal.io/sdk/workflow"
 )
 
+const (
+	DefaultTimeout = 0 * time.Minute // DefaultTimeout is the default timeout for the mutex.
+)
+
+const (
+	WorkflowSignalPrepare        queues.Signal = "mutex__prepare"
+	WorkflowSignalAcquire        queues.Signal = "mutex__acquire"
+	WorkflowSignalLocked         queues.Signal = "mutex__locked"
+	WorkflowSignalRelease        queues.Signal = "mutex__release"
+	WorkflowSignalReleased       queues.Signal = "mutex__released"
+	WorkflowSignalCleanup        queues.Signal = "mutex__cleanup"
+	WorkflowSignalCleanupDone    queues.Signal = "mutex__cleanup_done"
+	WorkflowSignalCleanupDoneAck queues.Signal = "mutex__cleanup_done_ack"
+	WorkflowSignalShutDown       queues.Signal = "mutex__shutdown"
+)
+
 type (
+	Option func(*Handler)
+
 	// Mutex defines the signature for the workflow mutex.
 	Mutex interface {
 		// OnAcquire blocks until the lock is acquired, executes fn, and then releases the lock.
 		// It returns an error if the lock cannot be acquired or the context is cancelled.
 		OnAcquire(ctx workflow.Context, fn func(workflow.Context)) error
 	}
+
+	// Handler is the Mutex handler.
+	Handler struct {
+		ResourceID string              `json:"resource_id"` // ResourceID identifies the resource being locked.
+		Info       *workflow.Info      `json:"info"`        // Info holds the workflow info that requests the mutex.
+		Execution  *workflow.Execution `json:"execution"`   // Info holds the workflow info that holds the mutex.
+		Timeout    time.Duration       `json:"timeout"`     // Timeout sets the timeout, after which the lock is automatically released.
+		logger     *MutexLogger
+	}
 )
+
+// WithResourceID sets the resource ID for the mutex workflow.
+func WithResourceID(id string) Option {
+	return func(m *Handler) {
+		m.ResourceID = id
+	}
+}
+
+// WithTimeout sets the timeout for the mutex workflow.
+func WithTimeout(timeout time.Duration) Option {
+	return func(m *Handler) {
+		m.Timeout = timeout
+	}
+}
 
 // New returns a new Mutex and initializes the underlying workflow.
 // It performs the "Prepare" step immediately.

@@ -67,20 +67,20 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	// Idle Timer Setup
 	// We use the periodic package to manage an idle timeout.
 	// If no activity occurs within IdleTimeout, the workflow shuts down.
-	idleTimer := periodic.New(ctx, IdleTimeout)
-	idleExpired := workflow.NewBufferedChannel(ctx, 1)
+	idle := periodic.New(ctx, IdleTimeout)
+	expired := workflow.NewBufferedChannel(ctx, 1)
 
 	workflow.Go(ctx, func(ctx workflow.Context) {
-		idleTimer.Tick(ctx)
+		idle.Tick(ctx)
 		// If Tick returns, it means the timer fired without being restarted/stopped.
-		idleExpired.Send(ctx, true)
+		expired.Send(ctx, true)
 	})
 
 	for state.Persist {
-		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main_loop", "waiting for lock request ...")
+		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "waiting for lock request ...")
 
 		// Reset idle timer to normal timeout while waiting
-		idleTimer.Restart(ctx, IdleTimeout)
+		idle.Restart(ctx, IdleTimeout)
 
 		acquirer := workflow.NewSelector(ctx)
 
@@ -91,8 +91,8 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		acquirer.AddFuture(shutdown, state.on_terminate(ctx))
 
 		// 3. Wait for Idle Timeout
-		acquirer.AddReceive(idleExpired, func(c workflow.ReceiveChannel, m bool) {
-			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "idle_timeout", "shutting down due to inactivity")
+		acquirer.AddReceive(expired, func(c workflow.ReceiveChannel, m bool) {
+			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "timeout", "shutting down due to inactivity")
 			state.stop_persisting(ctx)
 		})
 
@@ -104,13 +104,13 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 		// If we are here, we acquired the lock (since shutdown/idle didn't happen).
 		// "Pause" the idle timer while we process the lock.
-		idleTimer.Restart(ctx, LongTimeout)
+		idle.Restart(ctx, LongTimeout)
 
-		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main_loop", "lock acquired!")
+		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "lock acquired!")
 		state.to_locked(ctx)
 
 		for {
-			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main_loop", "waiting for release or timeout ...")
+			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "waiting for release or timeout ...")
 
 			releaser := workflow.NewSelector(ctx)
 
@@ -134,7 +134,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "shutdown", "shutdown!")
 
 	// Ensure idle timer is stopped to clean up goroutine
-	idleTimer.Stop(ctx)
+	idle.Stop(ctx)
 
 	return nil
 }

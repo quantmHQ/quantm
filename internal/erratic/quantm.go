@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"runtime"
 	"strings"
 
@@ -121,9 +122,7 @@ func (e *QuantmError) SetHintsWith(hints Hints) *QuantmError {
 		e.Hints = make(Hints)
 	}
 
-	for k, v := range hints {
-		e.Hints[k] = v
-	}
+	maps.Copy(e.Hints, hints)
 
 	return e
 }
@@ -191,9 +190,7 @@ func (e *QuantmError) WithHints(hints Hints) *QuantmError {
 		e.Hints = make(Hints)
 	}
 
-	for k, v := range hints {
-		e.Hints[k] = v
-	}
+	maps.Copy(e.Hints, hints)
 
 	return e
 }
