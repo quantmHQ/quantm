@@ -49,21 +49,20 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	// We use the periodic package to manage an idle timeout.
 	// If no activity occurs within IdleTimeout, the workflow shuts down.
 	idle := periodic.New(ctx, IdleTimeout)
-	expire := workflow.NewBufferedChannel(ctx, 1)
+	tick := workflow.NewBufferedChannel(ctx, 1)
 
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		idle.Tick(ctx)
 		// If Tick returns, it means the timer fired without being restarted/stopped.
-		expire.Send(ctx, true)
+		tick.Send(ctx, true)
 	})
 
-	state.logger.info(state.Handler.WorkflowExecutionID(), "start", "mutex workflow started")
+	state.start(ctx)
 
 	for state.Persist {
 		// --- Phase 1: Wait for Acquire ---
 
-		state.to_acquiring(ctx)
-		state.logger.info(state.Handler.WorkflowExecutionID(), "main", "waiting for lock request ...")
+		state.wait_acquire(ctx)
 
 		// Reset idle timer to normal timeout while waiting
 		idle.Restart(ctx, IdleTimeout)
@@ -78,21 +77,18 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		// 1. Wait for Acquire Signal
 		acquirer.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), func(c workflow.ReceiveChannel, _ bool) {
 			c.Receive(ctx, &rx)
-
 			acquired = true
 		})
 
 		// 2. Wait for Idle Timeout
-		acquirer.AddReceive(expire, func(_ workflow.ReceiveChannel, _ bool) {
+		acquirer.AddReceive(tick, func(_ workflow.ReceiveChannel, _ bool) {
 			timeout = true
 		})
 
 		acquirer.Select(ctx)
 
 		if timeout {
-			state.logger.info(state.Handler.WorkflowExecutionID(), "timeout", "shutting down due to inactivity")
-			state.stop_persisting(ctx)
-
+			state.idle_timeout(ctx)
 			break
 		}
 
@@ -105,21 +101,17 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		// Pause idle timer
 		idle.Restart(ctx, LongTimeout)
 
-		state.set_handler(ctx, &rx)
-		state.set_timeout(ctx, rx.Timeout)
-		state.to_locked(ctx)
+		state.acquired(ctx, &rx)
 
 		// Signal client that they have the lock
 		_ = workflow.
 			SignalExternalWorkflow(ctx, rx.WorkflowExecutionID(), rx.WorkflowRunID(), WorkflowSignalLocked.String(), true).
 			Get(ctx, nil)
 
-		state.logger.info(state.Handler.WorkflowExecutionID(), "main", "lock acquired", "holder", rx.WorkflowExecutionID())
-
 		// --- Phase 3: Wait for Release or Lease Timeout ---
 
 		// Setup Lease Timer
-		lease := workflow.NewTimer(ctx, state.Timeout)
+		timer := workflow.NewTimer(ctx, state.Timeout)
 
 		releaser := workflow.NewSelector(ctx)
 		released := false
@@ -134,12 +126,12 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 			if rx.WorkflowExecutionID() == state.Handler.WorkflowExecutionID() {
 				released = true
 			} else {
-				state.logger.warn(state.Handler.WorkflowExecutionID(), "release", "ignored release from non-holder", "sender", rx.WorkflowExecutionID())
+				state.ignore_release(ctx, rx.WorkflowExecutionID())
 			}
 		})
 
 		// 2. Wait for Lease Timeout
-		releaser.AddFuture(lease, func(_ workflow.Future) {
+		releaser.AddFuture(timer, func(_ workflow.Future) {
 			expired = true
 		})
 
@@ -147,15 +139,16 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 		if released {
 			state.to_releasing(ctx)
-			_ = workflow.SignalExternalWorkflow(ctx, state.Handler.WorkflowExecutionID(), state.Handler.WorkflowRunID(), WorkflowSignalReleased.String(), true).Get(ctx, nil)
+			_ = workflow.
+				SignalExternalWorkflow(ctx, state.Handler.WorkflowExecutionID(), state.Handler.WorkflowRunID(), WorkflowSignalReleased.String(), true).
+				Get(ctx, nil)
 			state.to_released(ctx)
 		} else if expired {
-			state.to_timeout(ctx)
-			state.logger.warn(state.Handler.WorkflowExecutionID(), "lease", "lock lease expired", "holder", state.Handler.WorkflowExecutionID())
+			state.lease_expired(ctx)
 		}
 	}
 
-	state.logger.info(state.Handler.WorkflowExecutionID(), "shutdown", "workflow completed")
+	state.shutdown(ctx)
 	idle.Stop(ctx)
 
 	return nil

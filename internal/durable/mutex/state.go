@@ -62,6 +62,47 @@ func (s *MutexState) set_query_state(ctx workflow.Context) error {
 	})
 }
 
+// start logs the start of the workflow.
+func (s *MutexState) start(ctx workflow.Context) {
+	s.logger.info(s.Handler.WorkflowExecutionID(), "start", "mutex workflow started")
+}
+
+// wait_acquire transitions to acquiring state and logs.
+func (s *MutexState) wait_acquire(ctx workflow.Context) {
+	s.to_acquiring(ctx)
+	s.logger.info(s.Handler.WorkflowExecutionID(), "main", "waiting for lock request ...")
+}
+
+// idle_timeout handles the idle timeout event.
+func (s *MutexState) idle_timeout(ctx workflow.Context) {
+	s.logger.info(s.Handler.WorkflowExecutionID(), "timeout", "shutting down due to inactivity")
+	s.stop_persisting(ctx)
+}
+
+// acquired handles the lock acquisition.
+func (s *MutexState) acquired(ctx workflow.Context, rx *Handler) {
+	s.Handler = rx
+	s.Timeout = rx.Timeout
+	s.to_locked(ctx)
+	s.logger.info(s.Handler.WorkflowExecutionID(), "main", "lock acquired", "holder", rx.WorkflowExecutionID())
+}
+
+// ignore_release logs a warning for a release attempt from a non-holder.
+func (s *MutexState) ignore_release(ctx workflow.Context, senderID string) {
+	s.logger.warn(s.Handler.WorkflowExecutionID(), "release", "ignored release from non-holder", "sender", senderID)
+}
+
+// lease_expired handles the lease expiration.
+func (s *MutexState) lease_expired(ctx workflow.Context) {
+	s.to_timeout(ctx)
+	s.logger.warn(s.Handler.WorkflowExecutionID(), "lease", "lock lease expired", "holder", s.Handler.WorkflowExecutionID())
+}
+
+// shutdown logs the workflow completion.
+func (s *MutexState) shutdown(ctx workflow.Context) {
+	s.logger.info(s.Handler.WorkflowExecutionID(), "shutdown", "workflow completed")
+}
+
 // to_locked transitions the state to Locked.
 func (s *MutexState) to_locked(ctx workflow.Context) {
 	s.Status = MutexStatusLocked
@@ -90,16 +131,6 @@ func (s *MutexState) to_timeout(ctx workflow.Context) {
 func (s *MutexState) to_acquiring(ctx workflow.Context) {
 	s.Status = MutexStatusAcquiring
 	s.logger.info(s.Handler.WorkflowExecutionID(), "transition", "to acquiring")
-}
-
-// set_handler updates the current handler.
-func (s *MutexState) set_handler(ctx workflow.Context, handler *Handler) {
-	s.Handler = handler
-}
-
-// set_timeout updates the current timeout.
-func (s *MutexState) set_timeout(ctx workflow.Context, timeout time.Duration) {
-	s.Timeout = timeout
 }
 
 // stop_persisting sets the persist flag to false.
