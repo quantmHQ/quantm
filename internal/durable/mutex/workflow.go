@@ -49,12 +49,12 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	// We use the periodic package to manage an idle timeout.
 	// If no activity occurs within IdleTimeout, the workflow shuts down.
 	idle := periodic.New(ctx, IdleTimeout)
-	expired := workflow.NewBufferedChannel(ctx, 1)
+	expire := workflow.NewBufferedChannel(ctx, 1)
 
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		idle.Tick(ctx)
 		// If Tick returns, it means the timer fired without being restarted/stopped.
-		expired.Send(ctx, true)
+		expire.Send(ctx, true)
 	})
 
 	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "start", "mutex workflow started")
@@ -68,26 +68,28 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		// Reset idle timer to normal timeout while waiting
 		idle.Restart(ctx, IdleTimeout)
 
-		var acquireHandler Handler
-		acquired := false
-		timedout := false
+		var rx Handler
 
-		selector := workflow.NewSelector(ctx)
+		acquired := false
+		timeout := false
+
+		acquirer := workflow.NewSelector(ctx)
 
 		// 1. Wait for Acquire Signal
-		selector.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), func(c workflow.ReceiveChannel, _ bool) {
-			c.Receive(ctx, &acquireHandler)
+		acquirer.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, &rx)
+
 			acquired = true
 		})
 
 		// 2. Wait for Idle Timeout
-		selector.AddReceive(expired, func(_ workflow.ReceiveChannel, _ bool) {
-			timedout = true
+		acquirer.AddReceive(expire, func(_ workflow.ReceiveChannel, _ bool) {
+			timeout = true
 		})
 
-		selector.Select(ctx)
+		acquirer.Select(ctx)
 
-		if timedout {
+		if timeout {
 			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "timeout", "shutting down due to inactivity")
 			state.stop_persisting(ctx)
 
@@ -103,51 +105,51 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		// Pause idle timer
 		idle.Restart(ctx, LongTimeout)
 
-		state.set_handler(ctx, &acquireHandler)
-		state.set_timeout(ctx, acquireHandler.Timeout)
+		state.set_handler(ctx, &rx)
+		state.set_timeout(ctx, rx.Timeout)
 		state.to_locked(ctx)
 
 		// Signal client that they have the lock
 		_ = workflow.
-			SignalExternalWorkflow(ctx, acquireHandler.Info.WorkflowExecution.ID, acquireHandler.Info.WorkflowExecution.RunID, WorkflowSignalLocked.String(), true).
+			SignalExternalWorkflow(ctx, rx.Info.WorkflowExecution.ID, rx.Info.WorkflowExecution.RunID, WorkflowSignalLocked.String(), true).
 			Get(ctx, nil)
 
-		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "lock acquired", "holder", acquireHandler.Info.WorkflowExecution.ID)
+		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "lock acquired", "holder", rx.Info.WorkflowExecution.ID)
 
 		// --- Phase 3: Wait for Release or Lease Timeout ---
 
 		// Setup Lease Timer
-		leaseTimer := workflow.NewTimer(ctx, state.Timeout)
+		lease := workflow.NewTimer(ctx, state.Timeout)
 
-		releaseSelector := workflow.NewSelector(ctx)
+		releaser := workflow.NewSelector(ctx)
 		released := false
-		leaseExpired := false
+		expired := false
 
 		// 1. Wait for Release Signal
-		releaseSelector.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalRelease.String()), func(c workflow.ReceiveChannel, _ bool) {
-			var releaseHandler Handler
-			c.Receive(ctx, &releaseHandler)
+		releaser.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalRelease.String()), func(c workflow.ReceiveChannel, _ bool) {
+			var rx Handler
+			c.Receive(ctx, &rx)
 
 			// Only accept release from the current holder
-			if releaseHandler.Info.WorkflowExecution.ID == state.Handler.Info.WorkflowExecution.ID {
+			if rx.Info.WorkflowExecution.ID == state.Handler.Info.WorkflowExecution.ID {
 				released = true
 			} else {
-				state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "release", "ignored release from non-holder", "sender", releaseHandler.Info.WorkflowExecution.ID)
+				state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "release", "ignored release from non-holder", "sender", rx.Info.WorkflowExecution.ID)
 			}
 		})
 
 		// 2. Wait for Lease Timeout
-		releaseSelector.AddFuture(leaseTimer, func(_ workflow.Future) {
-			leaseExpired = true
+		releaser.AddFuture(lease, func(_ workflow.Future) {
+			expired = true
 		})
 
-		releaseSelector.Select(ctx)
+		releaser.Select(ctx)
 
 		if released {
 			state.to_releasing(ctx)
 			_ = workflow.SignalExternalWorkflow(ctx, state.Handler.Info.WorkflowExecution.ID, state.Handler.Info.WorkflowExecution.RunID, WorkflowSignalReleased.String(), true).Get(ctx, nil)
 			state.to_released(ctx)
-		} else if leaseExpired {
+		} else if expired {
 			state.to_timeout(ctx)
 			state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "lease", "lock lease expired", "holder", state.Handler.Info.WorkflowExecution.ID)
 		}

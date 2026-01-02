@@ -118,10 +118,10 @@ func (h *Handler) OnAcquire(ctx workflow.Context, fn func(workflow.Context)) err
 func (h *Handler) acquire(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "requesting lock")
 
-	ctx = dispatch.WithDefaultActivityContext(ctx)
+	c := dispatch.WithDefaultActivityContext(ctx)
 
 	exe := &workflow.Execution{}
-	if err := workflow.ExecuteActivity(ctx, AcquireMutexActivity, h).Get(ctx, exe); err != nil {
+	if err := workflow.ExecuteActivity(c, AcquireMutexActivity, h).Get(c, exe); err != nil {
 		h.logger.warn(h.Info.WorkflowExecution.ID, "acquire", "unable to request lock", err)
 		return NewAcquireLockError(h.ResourceID)
 	}
@@ -130,21 +130,20 @@ func (h *Handler) acquire(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "waiting for lock")
 
 	locked := false
-	timedout := false
+	timeout := false
+	waiter := workflow.NewSelector(ctx)
 
-	selector := workflow.NewSelector(ctx)
-
-	selector.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalLocked.String()), func(c workflow.ReceiveChannel, _ bool) {
+	waiter.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalLocked.String()), func(c workflow.ReceiveChannel, _ bool) {
 		c.Receive(ctx, &locked)
 	})
 
-	selector.AddFuture(workflow.NewTimer(ctx, MaxAcquireWait), func(_ workflow.Future) {
-		timedout = true
+	waiter.AddFuture(workflow.NewTimer(ctx, MaxAcquireWait), func(_ workflow.Future) {
+		timeout = true
 	})
 
-	selector.Select(ctx)
+	waiter.Select(ctx)
 
-	if timedout {
+	if timeout {
 		h.logger.warn(h.Info.WorkflowExecution.ID, "acquire", "timeout waiting for lock")
 		return NewAcquireLockError(h.ResourceID)
 	}
@@ -171,21 +170,20 @@ func (h *Handler) release(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "release", "waiting for release confirmation")
 
 	released := false
-	timedout := false
+	timeout := false
+	waiter := workflow.NewSelector(ctx)
 
-	selector := workflow.NewSelector(ctx)
-
-	selector.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalReleased.String()), func(c workflow.ReceiveChannel, _ bool) {
+	waiter.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalReleased.String()), func(c workflow.ReceiveChannel, _ bool) {
 		c.Receive(ctx, &released)
 	})
 
-	selector.AddFuture(workflow.NewTimer(ctx, SignalTimeout), func(_ workflow.Future) {
-		timedout = true
+	waiter.AddFuture(workflow.NewTimer(ctx, SignalTimeout), func(_ workflow.Future) {
+		timeout = true
 	})
 
-	selector.Select(ctx)
+	waiter.Select(ctx)
 
-	if timedout {
+	if timeout {
 		h.logger.warn(h.Info.WorkflowExecution.ID, "release", "timeout waiting for release confirmation")
 		return NewReleaseLockError(h.ResourceID)
 	}
