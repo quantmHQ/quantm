@@ -95,8 +95,8 @@ func (s *MutexTestSuite) TestMutexWorkflow_ActivityResetIdle() {
 	s.env.RegisterWorkflowWithOptions(func(ctx workflow.Context) error { return nil }, workflow.RegisterOptions{Name: "caller-workflow-id"})
 
 	// Intercept SignalExternalWorkflow calls from Mutex -> Caller
-	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "caller-run-id", mutex.WorkflowSignalLocked.String(), mock.Anything).Return(nil)
-	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "caller-run-id", mutex.WorkflowSignalReleased.String(), mock.Anything).Return(nil)
+	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "caller-run-id", mutex.WorkflowSignalLocked.String(), mock.Anything).Return(nil)   // nolint
+	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "caller-run-id", mutex.WorkflowSignalReleased.String(), mock.Anything).Return(nil) // nolint
 
 	// 1. Advance time half-way to idle, then signal ACQUIRE
 	s.env.RegisterDelayedCallback(func() {

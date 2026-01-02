@@ -29,7 +29,7 @@ import (
 //	"ai.ctrlplane.mutex.resource-v2.{resource_id}"
 func MutexWorkflowOptions(resource_id string) workflows.Options {
 	opts, _ := workflows.NewOptions(
-		workflows.WithBlock("resource-v2"),
+		workflows.WithBlock("resource"),
 		workflows.WithBlockID(resource_id),
 	)
 
