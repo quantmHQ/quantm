@@ -114,7 +114,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		timer := workflow.NewTimer(ctx, state.Timeout)
 
 		releaser := workflow.NewSelector(ctx)
-		released := false
+		done := false
 		expired := false
 
 		// 1. Wait for Release Signal
@@ -124,7 +124,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 			// Only accept release from the current holder
 			if rx.WorkflowExecutionID() == state.Handler.WorkflowExecutionID() {
-				released = true
+				done = true
 			} else {
 				state.ignore_release(ctx, rx.WorkflowExecutionID())
 			}
@@ -137,7 +137,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 		releaser.Select(ctx)
 
-		if released {
+		if done {
 			state.to_releasing(ctx)
 			_ = workflow.
 				SignalExternalWorkflow(ctx, state.Handler.WorkflowExecutionID(), state.Handler.WorkflowRunID(), WorkflowSignalReleased.String(), true).
