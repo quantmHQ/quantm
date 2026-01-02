@@ -54,8 +54,6 @@ const (
 )
 
 // set_query_state sets a query handler for the mutex workflow.
-//
-// The query handler allows external systems to retrieve the current state of the mutex.
 func (s *MutexState) set_query_state(ctx workflow.Context) error {
 	return workflow.SetQueryHandler(ctx, WorkflowQueryState.String(), func() (*MutexState, error) {
 		return s, nil
@@ -73,34 +71,49 @@ func (s *MutexState) wait_acquire(ctx workflow.Context) {
 	s.logger.info(s.Handler.WorkflowExecutionID(), "main", "waiting for lock request ...")
 }
 
-// idle_timeout handles the idle timeout event.
-func (s *MutexState) idle_timeout(ctx workflow.Context) {
-	s.logger.info(s.Handler.WorkflowExecutionID(), "timeout", "shutting down due to inactivity")
-	s.stop_persisting(ctx)
+// on_aquire returns a callback for handling the acquire signal.
+func (s *MutexState) on_aquire(ctx workflow.Context) func(workflow.ReceiveChannel, bool) {
+	return func(c workflow.ReceiveChannel, _ bool) {
+		rx := &Handler{}
+		c.Receive(ctx, rx)
+
+		s.acquired(ctx, rx)
+	}
 }
 
-// acquired handles the lock acquisition.
+// acquired handles the lock acquisition and signals the client.
 func (s *MutexState) acquired(ctx workflow.Context, rx *Handler) {
 	s.Handler = rx
 	s.Timeout = rx.Timeout
 	s.to_locked(ctx)
+
+	_ = workflow.
+		SignalExternalWorkflow(ctx, s.Handler.WorkflowExecutionID(), s.Handler.WorkflowRunID(), WorkflowSignalLocked.String(), true).
+		Get(ctx, nil)
+
 	s.logger.info(s.Handler.WorkflowExecutionID(), "main", "lock acquired", "holder", rx.WorkflowExecutionID())
 }
 
-// ignore_release logs a warning for a release attempt from a non-holder.
-func (s *MutexState) ignore_release(ctx workflow.Context, senderID string) {
-	s.logger.warn(s.Handler.WorkflowExecutionID(), "release", "ignored release from non-holder", "sender", senderID)
+// on_idle returns a callback for handling the idle timeout.
+func (s *MutexState) on_idle(ctx workflow.Context) func(workflow.ReceiveChannel, bool) {
+	return func(_ workflow.ReceiveChannel, _ bool) {
+		s.logger.info(s.Handler.WorkflowExecutionID(), "timeout", "shutting down due to inactivity")
+		s.stop_persisting(ctx)
+	}
 }
 
-// lease_expired handles the lease expiration.
-func (s *MutexState) lease_expired(ctx workflow.Context) {
-	s.to_timeout(ctx)
-	s.logger.warn(s.Handler.WorkflowExecutionID(), "lease", "lock lease expired", "holder", s.Handler.WorkflowExecutionID())
-}
+// on_release returns a callback for handling the release signal.
+func (s *MutexState) on_release(ctx workflow.Context) func(workflow.ReceiveChannel, bool) {
+	return func(c workflow.ReceiveChannel, _ bool) {
+		rx := &Handler{}
+		c.Receive(ctx, rx)
 
-// shutdown logs the workflow completion.
-func (s *MutexState) shutdown(ctx workflow.Context) {
-	s.logger.info(s.Handler.WorkflowExecutionID(), "shutdown", "workflow completed")
+		if rx.WorkflowExecutionID() == s.Handler.WorkflowExecutionID() {
+			s.released(ctx)
+		} else {
+			s.ignore_release(ctx, rx.WorkflowExecutionID())
+		}
+	}
 }
 
 // released handles the lock release process.
@@ -112,6 +125,24 @@ func (s *MutexState) released(ctx workflow.Context) {
 		Get(ctx, nil)
 
 	s.to_released(ctx)
+}
+
+// ignore_release logs a warning for a release attempt from a non-holder.
+func (s *MutexState) ignore_release(ctx workflow.Context, senderID string) {
+	s.logger.warn(s.Handler.WorkflowExecutionID(), "release", "ignored release from non-holder", "sender", senderID)
+}
+
+// on_expired returns a callback for handling the lease expiration.
+func (s *MutexState) on_expired(ctx workflow.Context) func(workflow.Future) {
+	return func(_ workflow.Future) {
+		s.to_timeout(ctx)
+		s.logger.warn(s.Handler.WorkflowExecutionID(), "lease", "lock lease expired", "holder", s.Handler.WorkflowExecutionID())
+	}
+}
+
+// shutdown logs the workflow completion.
+func (s *MutexState) shutdown(ctx workflow.Context) {
+	s.logger.info(s.Handler.WorkflowExecutionID(), "shutdown", "workflow completed")
 }
 
 // to_locked transitions the state to Locked.
@@ -151,8 +182,6 @@ func (s *MutexState) stop_persisting(ctx workflow.Context) {
 }
 
 // restore reinitializes the logger.
-//
-// It should be called after deserializing a MutexState instance.
 func (s *MutexState) restore(ctx workflow.Context) {
 	s.logger = NewMutexControllerLogger(ctx, s.Handler.ResourceID)
 }
