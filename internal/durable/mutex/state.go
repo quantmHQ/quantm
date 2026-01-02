@@ -103,6 +103,17 @@ func (s *MutexState) shutdown(ctx workflow.Context) {
 	s.logger.info(s.Handler.WorkflowExecutionID(), "shutdown", "workflow completed")
 }
 
+// released handles the lock release process.
+func (s *MutexState) released(ctx workflow.Context) {
+	s.to_releasing(ctx)
+
+	_ = workflow.
+		SignalExternalWorkflow(ctx, s.Handler.WorkflowExecutionID(), s.Handler.WorkflowRunID(), WorkflowSignalReleased.String(), true).
+		Get(ctx, nil)
+
+	s.to_released(ctx)
+}
+
 // to_locked transitions the state to Locked.
 func (s *MutexState) to_locked(ctx workflow.Context) {
 	s.Status = MutexStatusLocked
