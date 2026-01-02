@@ -25,13 +25,12 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// PrepareMutexActivity prepares a mutex for a given resource.
+// AcquireMutexActivity signals the mutex workflow to acquire a lock.
 //
-// It either stars a new mutex workflow or signals an existing one to schedule a new lock.  It prepares the mutex for a
-// given resource by creating a MutexState with initial values and using SignalWithStartWorkflow to manage the
-// workflow.  Errors indicate issues during workflow signal or start. Success returns a workflow.Execution with the
-// workflow's ID and RunID.
-func PrepareMutexActivity(ctx context.Context, payload *Handler) (*workflow.Execution, error) {
+// It signals the mutex workflow for a given resource to acquire the lock. If the workflow is not already running,
+// it is started with the initial state.
+func AcquireMutexActivity(ctx context.Context, payload *Handler) (*workflow.Execution, error) {
+	// Initial state if the workflow needs to be started.
 	state := &MutexState{
 		Status:  MutexStatusAcquiring,
 		Handler: payload,
@@ -42,7 +41,7 @@ func PrepareMutexActivity(ctx context.Context, payload *Handler) (*workflow.Exec
 	exe, err := Queue().SignalWithStartWorkflow(
 		ctx,
 		MutexWorkflowOptions(payload.ResourceID),
-		WorkflowSignalPrepare,
+		WorkflowSignalAcquire,
 		payload,
 		MutexWorkflow,
 		state,

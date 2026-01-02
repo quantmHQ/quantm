@@ -34,35 +34,16 @@ const (
 
 // MutexWorkflow is the mutex workflow. It controls access to a resource.
 //
-// IMPORTANT: Do not use this function directly. Instead, use mutex.New to create and interact with mutex instances.
-//
-// The workflow consists of three main event loops:
-//  1. Main loop: Handles acquiring, releasing, and timing out of locks.
-//  2. Prepare loop: Listens for and handles preparation of lock requests.
-//  3. Cleanup loop: Manages the cleanup process and potential workflow shutdown.
-//
-// It operates as a state machine, transitioning between MutexStatus states:
-//
-// Acquiring -> Locked -> Releasing -> Released (or Timeout)
-//
-// Uses two pools to manage lock requests:
-//   - Main pool: Tracks active lock requests and currently held locks.
-//   - Orphans pool: Tracks locks that have timed out.
-//
-// Responds to several signals:
-//   - WorkflowSignalPrepare: Prepares a new lock request.
-//   - WorkflowSignalAcquire: Attempts to acquire a lock.
-//   - WorkflowSignalRelease: Releases a held lock.
-//   - WorkflowSignalCleanup: Initiates the cleanup process.
+// It operates as a serialized state machine:
+// 1. Wait for Acquire (or Idle Timeout).
+// 2. Lock Resource.
+// 3. Wait for Release (or Lease Timeout).
+// 4. Repeat.
 func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	state.restore(ctx)
 
-	shutdown, shutdownfn := workflow.NewFuture(ctx)
-
+	// Setup Query Handler
 	_ = state.set_query_state(ctx)
-
-	workflow.Go(ctx, state.on_prepare(ctx))
-	workflow.Go(ctx, state.on_cleanup(ctx, shutdownfn))
 
 	// Idle Timer Setup
 	// We use the periodic package to manage an idle timeout.
@@ -76,64 +57,103 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		expired.Send(ctx, true)
 	})
 
+	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "start", "mutex workflow started")
+
 	for state.Persist {
+		// --- Phase 1: Wait for Acquire ---
+
+		state.to_acquiring(ctx)
 		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "waiting for lock request ...")
 
 		// Reset idle timer to normal timeout while waiting
 		idle.Restart(ctx, IdleTimeout)
 
-		acquirer := workflow.NewSelector(ctx)
+		var acquireHandler Handler
+		acquired := false
+		timedout := false
 
-		// 1. Wait for Acquire
-		acquirer.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), state.on_acquire(ctx))
+		selector := workflow.NewSelector(ctx)
 
-		// 2. Wait for Manual Shutdown/Cleanup
-		acquirer.AddFuture(shutdown, state.on_terminate(ctx))
-
-		// 3. Wait for Idle Timeout
-		acquirer.AddReceive(expired, func(c workflow.ReceiveChannel, m bool) {
-			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "timeout", "shutting down due to inactivity")
-			state.stop_persisting(ctx)
+		// 1. Wait for Acquire Signal
+		selector.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, &acquireHandler)
+			acquired = true
 		})
 
-		acquirer.Select(ctx)
+		// 2. Wait for Idle Timeout
+		selector.AddReceive(expired, func(_ workflow.ReceiveChannel, _ bool) {
+			timedout = true
+		})
 
-		if !state.Persist {
-			break // Shutdown signal received or idle timeout
+		selector.Select(ctx)
+
+		if timedout {
+			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "timeout", "shutting down due to inactivity")
+			state.stop_persisting(ctx)
+
+			break
 		}
 
-		// If we are here, we acquired the lock (since shutdown/idle didn't happen).
-		// "Pause" the idle timer while we process the lock.
+		if !acquired {
+			continue
+		}
+
+		// --- Phase 2: Lock Acquired ---
+
+		// Pause idle timer
 		idle.Restart(ctx, LongTimeout)
 
-		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "lock acquired!")
+		state.set_handler(ctx, &acquireHandler)
+		state.set_timeout(ctx, acquireHandler.Timeout)
 		state.to_locked(ctx)
 
-		for {
-			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "waiting for release or timeout ...")
+		// Signal client that they have the lock
+		_ = workflow.
+			SignalExternalWorkflow(ctx, acquireHandler.Info.WorkflowExecution.ID, acquireHandler.Info.WorkflowExecution.RunID, WorkflowSignalLocked.String(), true).
+			Get(ctx, nil)
 
-			releaser := workflow.NewSelector(ctx)
+		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "lock acquired", "holder", acquireHandler.Info.WorkflowExecution.ID)
 
-			releaser.AddReceive(
-				workflow.GetSignalChannel(ctx, WorkflowSignalRelease.String()),
-				state.on_release(ctx),
-			)
-			releaser.AddFuture(workflow.NewTimer(ctx, state.Timeout), state.on_abort(ctx))
+		// --- Phase 3: Wait for Release or Lease Timeout ---
 
-			releaser.Select(ctx)
+		// Setup Lease Timer
+		leaseTimer := workflow.NewTimer(ctx, state.Timeout)
 
-			if state.Status == MutexStatusReleased || state.Status == MutexStatusTimeout {
-				state.to_acquiring(ctx)
-				break
+		releaseSelector := workflow.NewSelector(ctx)
+		released := false
+		leaseExpired := false
+
+		// 1. Wait for Release Signal
+		releaseSelector.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalRelease.String()), func(c workflow.ReceiveChannel, _ bool) {
+			var releaseHandler Handler
+			c.Receive(ctx, &releaseHandler)
+
+			// Only accept release from the current holder
+			if releaseHandler.Info.WorkflowExecution.ID == state.Handler.Info.WorkflowExecution.ID {
+				released = true
+			} else {
+				state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "release", "ignored release from non-holder", "sender", releaseHandler.Info.WorkflowExecution.ID)
 			}
+		})
+
+		// 2. Wait for Lease Timeout
+		releaseSelector.AddFuture(leaseTimer, func(_ workflow.Future) {
+			leaseExpired = true
+		})
+
+		releaseSelector.Select(ctx)
+
+		if released {
+			state.to_releasing(ctx)
+			_ = workflow.SignalExternalWorkflow(ctx, state.Handler.Info.WorkflowExecution.ID, state.Handler.Info.WorkflowExecution.RunID, WorkflowSignalReleased.String(), true).Get(ctx, nil)
+			state.to_released(ctx)
+		} else if leaseExpired {
+			state.to_timeout(ctx)
+			state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "lease", "lock lease expired", "holder", state.Handler.Info.WorkflowExecution.ID)
 		}
 	}
 
-	_ = workflow.Sleep(ctx, 500*time.Millisecond) // Wait for cleanup ack if needed
-
-	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "shutdown", "shutdown!")
-
-	// Ensure idle timer is stopped to clean up goroutine
+	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "shutdown", "workflow completed")
 	idle.Stop(ctx)
 
 	return nil

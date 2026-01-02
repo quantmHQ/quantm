@@ -73,7 +73,7 @@ func (s *MutexTestSuite) TestMutexWorkflow_IdleShutdown() {
 }
 
 func (s *MutexTestSuite) TestMutexWorkflow_ActivityResetIdle() {
-	// Scenario: Workflow starts, receives Prepare/Acquire signals.
+	// Scenario: Workflow starts, receives Acquire signals.
 	// Expected: Idle timer should be reset, preventing shutdown at T=10m.
 	resourceID := "test-resource-active"
 	handler := &mutex.Handler{
@@ -89,19 +89,14 @@ func (s *MutexTestSuite) TestMutexWorkflow_ActivityResetIdle() {
 		Handler: handler,
 		Timeout: handler.Timeout,
 		Persist: true,
-		Pool: &mutex.Pool{
-			Data: map[string]time.Duration{
-				"caller-workflow-id": handler.Timeout,
-			},
-		},
 	}
 
 	s.env.RegisterWorkflow(mutex.MutexWorkflow)
 	s.env.RegisterWorkflowWithOptions(func(ctx workflow.Context) error { return nil }, workflow.RegisterOptions{Name: "caller-workflow-id"})
 
 	// Intercept SignalExternalWorkflow calls from Mutex -> Caller
-	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "", mutex.WorkflowSignalLocked.String(), mock.Anything).Return(nil)
-	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "", mutex.WorkflowSignalReleased.String(), mock.Anything).Return(nil) // nolint
+	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "caller-run-id", mutex.WorkflowSignalLocked.String(), mock.Anything).Return(nil)
+	s.env.OnSignalExternalWorkflow(mock.Anything, "caller-workflow-id", "caller-run-id", mutex.WorkflowSignalReleased.String(), mock.Anything).Return(nil)
 
 	// 1. Advance time half-way to idle, then signal ACQUIRE
 	s.env.RegisterDelayedCallback(func() {
@@ -128,8 +123,8 @@ func (s *MutexTestSuite) TestMutexWorkflow_ActivityResetIdle() {
 
 func (s *MutexTestSuite) TestMutexWorkflow_Contention() {
 	// Scenario:
-	// 1. Client A prepares and acquires.
-	// 2. Client B prepares and tries to acquire (should block).
+	// 1. Client A acquires.
+	// 2. Client B tries to acquire (should block).
 	// 3. Client A releases.
 	// 4. Client B should get the lock.
 	// 5. Client B releases.
@@ -162,56 +157,47 @@ func (s *MutexTestSuite) TestMutexWorkflow_Contention() {
 	var eventLog []string
 
 	// Mocks for Client A
-	s.env.OnSignalExternalWorkflow(mock.Anything, "client-A", "", mutex.WorkflowSignalLocked.String(), mock.Anything).
+	s.env.OnSignalExternalWorkflow(mock.Anything, "client-A", "run-A", mutex.WorkflowSignalLocked.String(), mock.Anything).
 		Run(func(args mock.Arguments) {
 			eventLog = append(eventLog, "A-Locked")
 		}).Return(nil)
-	s.env.OnSignalExternalWorkflow(mock.Anything, "client-A", "", mutex.WorkflowSignalReleased.String(), mock.Anything).
+	s.env.OnSignalExternalWorkflow(mock.Anything, "client-A", "run-A", mutex.WorkflowSignalReleased.String(), mock.Anything).
 		Run(func(args mock.Arguments) {
 			eventLog = append(eventLog, "A-Released")
 		}).Return(nil)
 
 	// Mocks for Client B
-	s.env.OnSignalExternalWorkflow(mock.Anything, "client-B", "", mutex.WorkflowSignalLocked.String(), mock.Anything).
+	s.env.OnSignalExternalWorkflow(mock.Anything, "client-B", "run-B", mutex.WorkflowSignalLocked.String(), mock.Anything).
 		Run(func(args mock.Arguments) {
 			eventLog = append(eventLog, "B-Locked")
 		}).Return(nil)
-	s.env.OnSignalExternalWorkflow(mock.Anything, "client-B", "", mutex.WorkflowSignalReleased.String(), mock.Anything).
+	s.env.OnSignalExternalWorkflow(mock.Anything, "client-B", "run-B", mutex.WorkflowSignalReleased.String(), mock.Anything).
 		Run(func(args mock.Arguments) {
 			eventLog = append(eventLog, "B-Released")
 		}).Return(nil)
 
 	// Sequence
-	// T+1s: Prepare A
-	s.env.RegisterDelayedCallback(func() {
-		s.env.SignalWorkflow(mutex.WorkflowSignalPrepare.String(), handlerA)
-	}, 1*time.Second)
 
-	// T+2s: Prepare B
-	s.env.RegisterDelayedCallback(func() {
-		s.env.SignalWorkflow(mutex.WorkflowSignalPrepare.String(), handlerB)
-	}, 2*time.Second)
-
-	// T+3s: Acquire A
+	// T+1s: Acquire A
 	s.env.RegisterDelayedCallback(func() {
 		s.env.SignalWorkflow(mutex.WorkflowSignalAcquire.String(), handlerA)
-	}, 3*time.Second)
+	}, 1*time.Second)
 
-	// T+4s: Acquire B (Should be buffered)
+	// T+2s: Acquire B (Should be buffered)
 	s.env.RegisterDelayedCallback(func() {
 		s.env.SignalWorkflow(mutex.WorkflowSignalAcquire.String(), handlerB)
-	}, 4*time.Second)
+	}, 2*time.Second)
 
-	// T+6s: Release A
+	// T+4s: Release A
 	s.env.RegisterDelayedCallback(func() {
 		s.env.SignalWorkflow(mutex.WorkflowSignalRelease.String(), handlerA)
-	}, 6*time.Second)
+	}, 4*time.Second)
 
-	// T+8s: Release B
+	// T+6s: Release B
 	// Note: We need enough delay to ensure B processes its Locked signal
 	s.env.RegisterDelayedCallback(func() {
 		s.env.SignalWorkflow(mutex.WorkflowSignalRelease.String(), handlerB)
-	}, 8*time.Second)
+	}, 6*time.Second)
 
 	// T+15m: Ensure workflow eventually shuts down to finish test
 	// (Idle timeout is 10m, so it should shut down after last activity)
@@ -246,23 +232,33 @@ func (s *MutexTestSuite) TestClient_OnAcquire_Success() {
 	resourceID := "test-resource-client"
 	mutexWorkflowID := "ai.ctrlplane.mutex.resource-v2." + resourceID
 
-	// Mock the PrepareMutexActivity
-	s.env.OnActivity(mutex.PrepareMutexActivity, mock.Anything, mock.Anything).Return(
+	// Mock the AcquireMutexActivity
+	s.env.OnActivity(mutex.AcquireMutexActivity, mock.Anything, mock.Anything).Return(
 		&workflow.Execution{ID: mutexWorkflowID, RunID: "mutex-run-id"},
 		nil,
 	)
 
-	// Mock signals sent FROM Client TO MutexWorkflow
-	s.env.OnSignalExternalWorkflow(mock.Anything, mutexWorkflowID, "", mutex.WorkflowSignalAcquire.String(), mock.Anything).
-		Run(func(args mock.Arguments) {
-			s.env.SignalWorkflow(mutex.WorkflowSignalLocked.String(), true)
-		}).
-		Return(nil)
+	// Mock signals sent FROM Client TO MutexWorkflow (Acquire is sent via Activity, so only signals used in wait logic here)
+	// Actually, Acquire is sent via SignalExternalWorkflow inside AcquireMutexActivity helper in real usage?
+	// No, AcquireMutexActivity calls SignalWithStart.
+	// The client workflow (ConsumerWorkflowForTest) -> m.OnAcquire -> calls AcquireMutexActivity.
+	// Then m.OnAcquire waits for "mutex__locked".
 
-	s.env.OnSignalExternalWorkflow(mock.Anything, mutexWorkflowID, "", mutex.WorkflowSignalRelease.String(), mock.Anything).
-		Run(func(args mock.Arguments) {
-			s.env.SignalWorkflow(mutex.WorkflowSignalReleased.String(), true) // Not orphan
-		}).
+	// We need to simulate the MutexWorkflow signaling BACK to the client.
+	// Since we are running the ConsumerWorkflow, we need to mock the "environment" responding to it.
+	// The Consumer calls Activity, then waits for Signal "mutex__locked".
+	// We can use RegisterDelayedCallback to simulate the signal arrival.
+
+	s.env.RegisterDelayedCallback(func() {
+		s.env.SignalWorkflow(mutex.WorkflowSignalLocked.String(), true)
+	}, 1*time.Second)
+
+	s.env.RegisterDelayedCallback(func() {
+		s.env.SignalWorkflow(mutex.WorkflowSignalReleased.String(), true)
+	}, 7*time.Second) // 1s (start) + 5s (sleep) + buffer
+
+	// Also mock the Release signal from Client -> Mutex
+	s.env.OnSignalExternalWorkflow(mock.Anything, mutexWorkflowID, "mutex-run-id", mutex.WorkflowSignalRelease.String(), mock.Anything).
 		Return(nil)
 
 	s.env.ExecuteWorkflow(ConsumerWorkflowForTest, resourceID)
@@ -275,23 +271,23 @@ func (s *MutexTestSuite) TestClient_OnAcquire_PanicSafety() {
 	resourceID := "test-resource-panic"
 	mutexWorkflowID := "ai.ctrlplane.mutex.resource-v2." + resourceID
 
-	s.env.OnActivity(mutex.PrepareMutexActivity, mock.Anything, mock.Anything).Return(
+	s.env.OnActivity(mutex.AcquireMutexActivity, mock.Anything, mock.Anything).Return(
 		&workflow.Execution{ID: mutexWorkflowID, RunID: "mutex-run-id"},
 		nil,
 	)
 
-	// Expect Acquire signal
-	s.env.OnSignalExternalWorkflow(mock.Anything, mutexWorkflowID, "", mutex.WorkflowSignalAcquire.String(), mock.Anything).
-		Run(func(args mock.Arguments) {
-			s.env.SignalWorkflow(mutex.WorkflowSignalLocked.String(), true)
-		}).
-		Return(nil)
+	// Simulate lock acquired signal
+	s.env.RegisterDelayedCallback(func() {
+		s.env.SignalWorkflow(mutex.WorkflowSignalLocked.String(), true)
+	}, 1*time.Second)
+
+	// Simulate release confirmation signal
+	s.env.RegisterDelayedCallback(func() {
+		s.env.SignalWorkflow(mutex.WorkflowSignalReleased.String(), true)
+	}, 2*time.Second)
 
 	// Expect Release signal DESPITE panic
-	s.env.OnSignalExternalWorkflow(mock.Anything, mutexWorkflowID, "", mutex.WorkflowSignalRelease.String(), mock.Anything).
-		Run(func(args mock.Arguments) {
-			s.env.SignalWorkflow(mutex.WorkflowSignalReleased.String(), true)
-		}).
+	s.env.OnSignalExternalWorkflow(mock.Anything, mutexWorkflowID, "mutex-run-id", mutex.WorkflowSignalRelease.String(), mock.Anything).
 		Return(nil)
 
 	// Define a workflow that panics inside the lock
