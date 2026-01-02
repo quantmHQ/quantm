@@ -85,13 +85,29 @@ func New(ctx workflow.Context, opts ...Option) (Mutex, error) {
 	h.logger = NewMutexHandlerLogger(ctx, h.ResourceID)
 
 	if err := h.validate(); err != nil {
-		h.logger.error(h.Info.WorkflowExecution.ID, "create", "validate error", err)
+		h.logger.error(h.WorkflowExecutionID(), "create", "validate error", err)
 		return nil, err
 	}
 
-	h.logger.info(h.Info.WorkflowExecution.ID, "create", "mutex handler initialized")
+	h.logger.info(h.WorkflowExecutionID(), "create", "mutex handler initialized")
 
 	return h, nil
+}
+
+func (h *Handler) WorkflowExecutionID() string {
+	if h.Info == nil {
+		return ""
+	}
+
+	return h.Info.WorkflowExecution.ID
+}
+
+func (h *Handler) WorkflowRunID() string {
+	if h.Info == nil {
+		return ""
+	}
+
+	return h.Info.WorkflowExecution.RunID
 }
 
 // OnAcquire blocks until acquired (or timeout), executes the closure, and releases the lock.
@@ -104,7 +120,7 @@ func (h *Handler) OnAcquire(ctx workflow.Context, fn func(workflow.Context)) err
 	// 2. Ensure Release
 	defer func() {
 		if err := h.release(ctx); err != nil {
-			h.logger.error(h.Info.WorkflowExecution.ID, "release", "failed to release lock", err)
+			h.logger.error(h.WorkflowExecutionID(), "release", "failed to release lock", err)
 		}
 	}()
 
@@ -116,18 +132,18 @@ func (h *Handler) OnAcquire(ctx workflow.Context, fn func(workflow.Context)) err
 
 // Internal helper to acquire the lock.
 func (h *Handler) acquire(ctx workflow.Context) error {
-	h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "requesting lock")
+	h.logger.info(h.WorkflowExecutionID(), "acquire", "requesting lock")
 
 	c := dispatch.WithDefaultActivityContext(ctx)
 
 	exe := &workflow.Execution{}
 	if err := workflow.ExecuteActivity(c, AcquireMutexActivity, h).Get(c, exe); err != nil {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "acquire", "unable to request lock", err)
+		h.logger.warn(h.WorkflowExecutionID(), "acquire", "unable to request lock", err)
 		return NewAcquireLockError(h.ResourceID)
 	}
 
 	h.Execution = exe
-	h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "waiting for lock")
+	h.logger.info(h.WorkflowExecutionID(), "acquire", "waiting for lock")
 
 	locked := false
 	timeout := false
@@ -144,12 +160,12 @@ func (h *Handler) acquire(ctx workflow.Context) error {
 	waiter.Select(ctx)
 
 	if timeout {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "acquire", "timeout waiting for lock")
+		h.logger.warn(h.WorkflowExecutionID(), "acquire", "timeout waiting for lock")
 		return NewAcquireLockError(h.ResourceID)
 	}
 
 	if locked {
-		h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "lock acquired")
+		h.logger.info(h.WorkflowExecutionID(), "acquire", "lock acquired")
 		return nil
 	}
 
@@ -158,16 +174,16 @@ func (h *Handler) acquire(ctx workflow.Context) error {
 
 // Internal helper to release the lock.
 func (h *Handler) release(ctx workflow.Context) error {
-	h.logger.info(h.Info.WorkflowExecution.ID, "release", "requesting release")
+	h.logger.info(h.WorkflowExecutionID(), "release", "requesting release")
 
 	if err := workflow.
 		SignalExternalWorkflow(ctx, h.Execution.ID, h.Execution.RunID, WorkflowSignalRelease.String(), h).
 		Get(ctx, nil); err != nil {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "release", "unable to request release", err)
+		h.logger.warn(h.WorkflowExecutionID(), "release", "unable to request release", err)
 		return NewReleaseLockError(h.ResourceID)
 	}
 
-	h.logger.info(h.Info.WorkflowExecution.ID, "release", "waiting for release confirmation")
+	h.logger.info(h.WorkflowExecutionID(), "release", "waiting for release confirmation")
 
 	released := false
 	timeout := false
@@ -184,12 +200,12 @@ func (h *Handler) release(ctx workflow.Context) error {
 	waiter.Select(ctx)
 
 	if timeout {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "release", "timeout waiting for release confirmation")
+		h.logger.warn(h.WorkflowExecutionID(), "release", "timeout waiting for release confirmation")
 		return NewReleaseLockError(h.ResourceID)
 	}
 
 	if released {
-		h.logger.info(h.Info.WorkflowExecution.ID, "release", "lock released")
+		h.logger.info(h.WorkflowExecutionID(), "release", "lock released")
 	}
 
 	return nil

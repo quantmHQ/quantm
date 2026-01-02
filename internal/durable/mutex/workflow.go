@@ -57,13 +57,13 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		expire.Send(ctx, true)
 	})
 
-	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "start", "mutex workflow started")
+	state.logger.info(state.Handler.WorkflowExecutionID(), "start", "mutex workflow started")
 
 	for state.Persist {
 		// --- Phase 1: Wait for Acquire ---
 
 		state.to_acquiring(ctx)
-		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "waiting for lock request ...")
+		state.logger.info(state.Handler.WorkflowExecutionID(), "main", "waiting for lock request ...")
 
 		// Reset idle timer to normal timeout while waiting
 		idle.Restart(ctx, IdleTimeout)
@@ -90,7 +90,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		acquirer.Select(ctx)
 
 		if timeout {
-			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "timeout", "shutting down due to inactivity")
+			state.logger.info(state.Handler.WorkflowExecutionID(), "timeout", "shutting down due to inactivity")
 			state.stop_persisting(ctx)
 
 			break
@@ -111,10 +111,10 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 		// Signal client that they have the lock
 		_ = workflow.
-			SignalExternalWorkflow(ctx, rx.Info.WorkflowExecution.ID, rx.Info.WorkflowExecution.RunID, WorkflowSignalLocked.String(), true).
+			SignalExternalWorkflow(ctx, rx.WorkflowExecutionID(), rx.WorkflowRunID(), WorkflowSignalLocked.String(), true).
 			Get(ctx, nil)
 
-		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main", "lock acquired", "holder", rx.Info.WorkflowExecution.ID)
+		state.logger.info(state.Handler.WorkflowExecutionID(), "main", "lock acquired", "holder", rx.WorkflowExecutionID())
 
 		// --- Phase 3: Wait for Release or Lease Timeout ---
 
@@ -131,10 +131,10 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 			c.Receive(ctx, &rx)
 
 			// Only accept release from the current holder
-			if rx.Info.WorkflowExecution.ID == state.Handler.Info.WorkflowExecution.ID {
+			if rx.WorkflowExecutionID() == state.Handler.WorkflowExecutionID() {
 				released = true
 			} else {
-				state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "release", "ignored release from non-holder", "sender", rx.Info.WorkflowExecution.ID)
+				state.logger.warn(state.Handler.WorkflowExecutionID(), "release", "ignored release from non-holder", "sender", rx.WorkflowExecutionID())
 			}
 		})
 
@@ -147,15 +147,15 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 		if released {
 			state.to_releasing(ctx)
-			_ = workflow.SignalExternalWorkflow(ctx, state.Handler.Info.WorkflowExecution.ID, state.Handler.Info.WorkflowExecution.RunID, WorkflowSignalReleased.String(), true).Get(ctx, nil)
+			_ = workflow.SignalExternalWorkflow(ctx, state.Handler.WorkflowExecutionID(), state.Handler.WorkflowRunID(), WorkflowSignalReleased.String(), true).Get(ctx, nil)
 			state.to_released(ctx)
 		} else if expired {
 			state.to_timeout(ctx)
-			state.logger.warn(state.Handler.Info.WorkflowExecution.ID, "lease", "lock lease expired", "holder", state.Handler.Info.WorkflowExecution.ID)
+			state.logger.warn(state.Handler.WorkflowExecutionID(), "lease", "lock lease expired", "holder", state.Handler.WorkflowExecutionID())
 		}
 	}
 
-	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "shutdown", "workflow completed")
+	state.logger.info(state.Handler.WorkflowExecutionID(), "shutdown", "workflow completed")
 	idle.Stop(ctx)
 
 	return nil

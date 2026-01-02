@@ -65,31 +65,31 @@ func (s *MutexState) set_query_state(ctx workflow.Context) error {
 // to_locked transitions the state to Locked.
 func (s *MutexState) to_locked(ctx workflow.Context) {
 	s.Status = MutexStatusLocked
-	s.logger.info(s.Handler.Info.WorkflowExecution.ID, "transition", "to locked")
+	s.logger.info(s.Handler.WorkflowExecutionID(), "transition", "to locked")
 }
 
 // to_releasing transitions the state to Releasing.
 func (s *MutexState) to_releasing(ctx workflow.Context) {
 	s.Status = MutexStatusReleasing
-	s.logger.info(s.Handler.Info.WorkflowExecution.ID, "transition", "to releasing")
+	s.logger.info(s.Handler.WorkflowExecutionID(), "transition", "to releasing")
 }
 
 // to_released transitions the state to Released.
 func (s *MutexState) to_released(ctx workflow.Context) {
 	s.Status = MutexStatusReleased
-	s.logger.info(s.Handler.Info.WorkflowExecution.ID, "transition", "to released")
+	s.logger.info(s.Handler.WorkflowExecutionID(), "transition", "to released")
 }
 
 // to_timeout transitions the state to Timeout.
 func (s *MutexState) to_timeout(ctx workflow.Context) {
 	s.Status = MutexStatusTimeout
-	s.logger.info(s.Handler.Info.WorkflowExecution.ID, "transition", "to timeout")
+	s.logger.info(s.Handler.WorkflowExecutionID(), "transition", "to timeout")
 }
 
 // to_acquiring transitions the state to Acquiring.
 func (s *MutexState) to_acquiring(ctx workflow.Context) {
 	s.Status = MutexStatusAcquiring
-	s.logger.info(s.Handler.Info.WorkflowExecution.ID, "transition", "to acquiring")
+	s.logger.info(s.Handler.WorkflowExecutionID(), "transition", "to acquiring")
 }
 
 // set_handler updates the current handler.
@@ -105,7 +105,7 @@ func (s *MutexState) set_timeout(ctx workflow.Context, timeout time.Duration) {
 // stop_persisting sets the persist flag to false.
 func (s *MutexState) stop_persisting(ctx workflow.Context) {
 	s.Persist = false
-	s.logger.info(s.Handler.Info.WorkflowExecution.ID, "persist", "stopped")
+	s.logger.info(s.Handler.WorkflowExecutionID(), "persist", "stopped")
 }
 
 // restore reinitializes the logger.
