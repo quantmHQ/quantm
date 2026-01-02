@@ -19,54 +19,18 @@
 
 // Package mutex provides a distributed, durable mutex implementation for Temporal workflows.
 //
-// This package offers a custom mutex solution that extends beyond Temporal's built-in mutex capabilities. While
-// Temporal's native mutex is local to a specific workflow, this implementation provides global and durable locks that
-// can persist across multiple workflows.
-//
-// Features:
-//
-//   - Global Locking: Allows locking resources across different workflows and activities.
-//   - Durability: Locks persist even if the original locking workflow terminates unexpectedly.
-//   - Timeout Handling: Supports automatic lock release after a specified timeout.
-//   - Orphan Tracking: Keeps track of timed-out locks for potential recovery or cleanup.
-//   - Cleanup Mechanism: Provides a way to clean up and shut down mutex workflows when no longer needed.
-//   - Flexible Resource Identification: Supports a hierarchical resource ID system for precise locking.
-//
-// Global and durable locks are necessary in distributed systems for several reasons:
-//
-//   - Cross-Workflow Coordination: Ensures only one workflow can access a resource at a time.
-//   - Long-Running Operations: Protects resources during extended operations, even if workflows crash.
-//   - Consistency in Distributed State: Maintains consistency by serializing access to shared resources.
-//   - Workflow Independence: Allows for flexible system design with runtime coordination.
-//   - Fault Tolerance: Prevents conflicts during partial system failures and recovery.
-//   - Complex Resource Hierarchies: Manages access to interrelated resources across workflows.
-//
-// The mutex provides four operations, all of which must be used during the lifecycle of usage:
-//
-//   - Prepare: Gets the reference for the lock. If not found, creates a new global reference.
-//   - Acquire: Attempts to acquire the lock, blocking until successful or timeout occurs.
-//   - Release: Releases the held lock, allowing other workflows to acquire it.
-//   - Cleanup: Attempts to shut down the mutex workflow if it's no longer needed.
+// This package introduces a safer, functional API and automatic lifecycle management.
 //
 // Usage:
 //
-//	m := mutex.New(
-//		ctx,
-//		mutex.WithResourceID("io.quantm.stack.123.mutex"),
-//		mutex.WithTimeout(30*time.Minute),
-//	)
-//	if err := m.Prepare(ctx); err != nil {
-//		// handle error
-//	}
-//	if err := m.Acquire(ctx); err != nil {
-//		// handle error
-//	}
-//	if err := m.Release(ctx); err != nil {
-//		// handle error
-//	}
-//	if err := m.Cleanup(ctx); err != nil {
-//		// handle error
+//	lock, err := mutex.New(ctx, mutex.WithResourceID("my-resource-id"))
+//	if err != nil {
+//	    return err
 //	}
 //
-// This mutex implementation relies on Temporal workflows and should be used within a Temporal workflow context.
+//	err = lock.OnAcquire(ctx, func(lockCtx workflow.Context) {
+//	    // Critical section
+//	    // The lock is held during this execution.
+//	    // It is automatically released when this function returns.
+//	})
 package mutex

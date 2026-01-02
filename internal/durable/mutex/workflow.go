@@ -23,6 +23,13 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/workflow"
+
+	"go.breu.io/quantm/internal/durable/periodic"
+)
+
+const (
+	IdleTimeout = 10 * time.Minute
+	LongTimeout = 365 * 24 * time.Hour // Effectively infinite for "pausing" the idle timer
 )
 
 // MutexWorkflow is the mutex workflow. It controls access to a resource.
@@ -57,27 +64,47 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	workflow.Go(ctx, state.on_prepare(ctx))
 	workflow.Go(ctx, state.on_cleanup(ctx, shutdownfn))
 
+	// Idle Timer Setup
+	// We use the periodic package to manage an idle timeout.
+	// If no activity occurs within IdleTimeout, the workflow shuts down.
+	idleTimer := periodic.New(ctx, IdleTimeout)
+	idleExpired := workflow.NewBufferedChannel(ctx, 1)
+
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		idleTimer.Tick(ctx)
+		// If Tick returns, it means the timer fired without being restarted/stopped.
+		idleExpired.Send(ctx, true)
+	})
+
 	for state.Persist {
 		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main_loop", "waiting for lock request ...")
 
-		found := true
+		// Reset idle timer to normal timeout while waiting
+		idleTimer.Restart(ctx, IdleTimeout)
+
 		acquirer := workflow.NewSelector(ctx)
 
+		// 1. Wait for Acquire
 		acquirer.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), state.on_acquire(ctx))
+
+		// 2. Wait for Manual Shutdown/Cleanup
 		acquirer.AddFuture(shutdown, state.on_terminate(ctx))
+
+		// 3. Wait for Idle Timeout
+		acquirer.AddReceive(idleExpired, func(c workflow.ReceiveChannel, m bool) {
+			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "idle_timeout", "shutting down due to inactivity")
+			state.stop_persisting(ctx)
+		})
 
 		acquirer.Select(ctx)
 
 		if !state.Persist {
-			break // Shutdown signal received
+			break // Shutdown signal received or idle timeout
 		}
 
-		if !found {
-			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main_loop", "lock not found in the pool, retrying ...")
-			state.to_acquiring(ctx)
-
-			continue
-		}
+		// If we are here, we acquired the lock (since shutdown/idle didn't happen).
+		// "Pause" the idle timer while we process the lock.
+		idleTimer.Restart(ctx, LongTimeout)
 
 		state.logger.info(state.Handler.Info.WorkflowExecution.ID, "main_loop", "lock acquired!")
 		state.to_locked(ctx)
@@ -102,9 +129,12 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		}
 	}
 
-	_ = workflow.Sleep(ctx, 500*time.Millisecond) // NOTE: This is a hack to wait for the signal from the cleanup loop.
+	_ = workflow.Sleep(ctx, 500*time.Millisecond) // Wait for cleanup ack if needed
 
 	state.logger.info(state.Handler.Info.WorkflowExecution.ID, "shutdown", "shutdown!")
+
+	// Ensure idle timer is stopped to clean up goroutine
+	idleTimer.Stop(ctx)
 
 	return nil
 }

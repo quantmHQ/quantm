@@ -20,94 +20,76 @@
 package mutex
 
 import (
-	"time"
-
 	"go.breu.io/durex/dispatch"
-	"go.breu.io/durex/queues"
 	"go.temporal.io/sdk/workflow"
 )
 
-const (
-	DefaultTimeout = 0 * time.Minute // DefaultTimeout is the default timeout for the mutex.
-)
-
-const (
-	WorkflowSignalPrepare        queues.Signal = "mutex__prepare"
-	WorkflowSignalAcquire        queues.Signal = "mutex__acquire"
-	WorkflowSignalLocked         queues.Signal = "mutex__locked"
-	WorkflowSignalRelease        queues.Signal = "mutex__release"
-	WorkflowSignalReleased       queues.Signal = "mutex__released"
-	WorkflowSignalCleanup        queues.Signal = "mutex__cleanup"
-	WorkflowSignalCleanupDone    queues.Signal = "mutex__cleanup_done"
-	WorkflowSignalCleanupDoneAck queues.Signal = "mutex__cleanup_done_ack"
-	WorkflowSignalShutDown       queues.Signal = "mutex__shutdown"
-)
-
 type (
-	// Mutex defines the signature for the workflow mutex. This workflow is meant to control the access to a resource.
+	// Mutex defines the signature for the workflow mutex.
 	Mutex interface {
-		Prepare(ctx workflow.Context) error // Prepares the mutex for use.
-		Acquire(ctx workflow.Context) error // Acquire aquires the lock.
-		Release(ctx workflow.Context) error // Release releases the lock.
-		Cleanup(ctx workflow.Context) error // Cleanup attempts to shutdown the mutex workflow, if it is no longer needed.
-	}
-
-	Option func(*Handler)
-
-	// Handler is the Mutex handler.
-	Handler struct {
-		ResourceID string              `json:"resource_id"` // ResourceID identifies the resource being locked.
-		Info       *workflow.Info      `json:"info"`        // Info holds the workflow info that requests the mutex.
-		Execution  *workflow.Execution `json:"execution"`   // Info holds the workflow info that holds the mutex.
-		Timeout    time.Duration       `json:"timeout"`     // Timeout sets the timeout, after which the lock is automatically released.
-		logger     *MutexLogger
+		// OnAcquire blocks until the lock is acquired, executes fn, and then releases the lock.
+		// It returns an error if the lock cannot be acquired or the context is cancelled.
+		OnAcquire(ctx workflow.Context, fn func(workflow.Context)) error
 	}
 )
 
-// Prepare prepares the mutex for use by executing the PrepareMutexActivity. It validates the mutex configuration, sets
-// up the activity options, and executes the activity. If successful, it sets the Execution field of the Handler.
-//
-// Usage:
-//
-//	mutex := New(ctx, WithResourceID("resource-id"))
-//	err := mutex.Prepare(ctx)
-//	if err != nil {
-//	  // handle error
-//	}
-func (h *Handler) Prepare(ctx workflow.Context) error {
-	if err := h.validate(); err != nil {
-		h.logger.error(h.Info.WorkflowExecution.ID, "prepare", "validate error", err)
-		return err
+// New returns a new Mutex and initializes the underlying workflow.
+// It performs the "Prepare" step immediately.
+func New(ctx workflow.Context, opts ...Option) (Mutex, error) {
+	h := &Handler{Timeout: DefaultTimeout}
+	for _, opt := range opts {
+		opt(h)
 	}
 
-	h.logger.info(h.Info.WorkflowExecution.ID, "prepare", "preparing mutex")
+	h.Info = workflow.GetInfo(ctx)
+	h.logger = NewMutexHandlerLogger(ctx, h.ResourceID)
 
+	if err := h.validate(); err != nil {
+		h.logger.error(h.Info.WorkflowExecution.ID, "create", "validate error", err)
+		return nil, err
+	}
+
+	h.logger.info(h.Info.WorkflowExecution.ID, "create", "initializing mutex")
+
+	// Prepare/Initialize the workflow via Activity
 	ctx = dispatch.WithDefaultActivityContext(ctx)
 
 	exe := &workflow.Execution{}
 	if err := workflow.ExecuteActivity(ctx, PrepareMutexActivity, h).Get(ctx, exe); err != nil {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "prepare", "Unable to prepare mutex", err)
-		return NewPrepareMutexError(h.ResourceID)
+		h.logger.warn(h.Info.WorkflowExecution.ID, "create", "Unable to prepare mutex", err)
+		return nil, NewPrepareMutexError(h.ResourceID)
 	}
 
 	h.Execution = exe
+	h.logger.info(h.Info.WorkflowExecution.ID, "create", "mutex initialized", "id", h.Execution.ID)
 
-	h.logger.info(h.Info.WorkflowExecution.ID, "prepare", "mutex prepared", "id", h.Execution.ID)
+	return h, nil
+}
+
+// OnAcquire blocks until acquired (or timeout), executes the closure, and releases the lock.
+func (h *Handler) OnAcquire(ctx workflow.Context, fn func(workflow.Context)) error {
+	// 1. Acquire
+	if err := h.acquire(ctx); err != nil {
+		return err
+	}
+
+	// 2. Ensure Release
+	defer func() {
+		if err := h.release(ctx); err != nil {
+			h.logger.error(h.Info.WorkflowExecution.ID, "release", "failed to release lock during cleanup", err)
+		}
+	}()
+
+	// 3. Execute Critical Section
+	// We pass the same context for now. In the future, we could pass a cancellable context
+	// linked to the lock lease.
+	fn(ctx)
 
 	return nil
 }
 
-// Acquire attempts to acquire the lock by signaling the mutex workflow. It waits for the WorkflowSignalLocked signal to
-// confirm acquisition.
-//
-// Usage:
-//
-//	err := mutex.Acquire(ctx)
-//	if err != nil {
-//	  // handle error
-//	}
-//	// Critical section - mutex is acquired
-func (h *Handler) Acquire(ctx workflow.Context) error {
+// Internal helper to acquire the lock.
+func (h *Handler) acquire(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "requesting lock")
 
 	ok := true
@@ -130,16 +112,8 @@ func (h *Handler) Acquire(ctx workflow.Context) error {
 	return NewAcquireLockError(h.ResourceID)
 }
 
-// Release signals the mutex workflow to release the lock. It waits for the WorkflowSignalReleased signal to confirm the
-// release.
-//
-// Usage:
-//
-//	err := mutex.Release(ctx)
-//	if err != nil {
-//	  // handle error
-//	}
-func (h *Handler) Release(ctx workflow.Context) error {
+// Internal helper to release the lock.
+func (h *Handler) release(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "release", "requesting release")
 
 	orphan := false
@@ -163,49 +137,7 @@ func (h *Handler) Release(ctx workflow.Context) error {
 	return nil
 }
 
-// Cleanup attempts to shut down the mutex workflow if it's no longer needed. It signals the mutex workflow and waits
-// for confirmation of cleanup.
-//
-// Usage:
-//
-//	err := mutex.Cleanup(ctx)
-//	if err != nil {
-//	  // handle error
-//	}
-func (h *Handler) Cleanup(ctx workflow.Context) error {
-	h.logger.info(h.Info.WorkflowExecution.ID, "cleanup", "requesting cleanup")
-
-	shutdown := false
-
-	if err := workflow.
-		SignalExternalWorkflow(ctx, h.Execution.ID, "", WorkflowSignalCleanup.String(), h).
-		Get(ctx, nil); err != nil {
-		h.logger.error(h.Info.WorkflowExecution.ID, "cleanup", "Unable to clean up", err)
-		return NewCleanupMutexError(h.ResourceID)
-	}
-
-	h.logger.info(h.Info.WorkflowExecution.ID, "cleanup", "waiting for cleanup")
-	workflow.GetSignalChannel(ctx, WorkflowSignalCleanupDone.String()).Receive(ctx, &shutdown)
-
-	if err := workflow.
-		SignalExternalWorkflow(ctx, h.Execution.ID, "", WorkflowSignalCleanupDoneAck.String(), shutdown).
-		Get(ctx, nil); err != nil {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "cleanup", "Unable to acknowledge cleanup", err)
-		return NewCleanupMutexError(h.ResourceID)
-	}
-
-	if shutdown {
-		h.logger.info(h.Info.WorkflowExecution.ID, "cleanup", "cleanup done")
-	} else {
-		h.logger.warn(h.Info.WorkflowExecution.ID, "cleanup", "cleanup failed, mutex in use", nil)
-	}
-
-	return nil
-}
-
-// validate checks if the mutex is properly configured with a ResourceID and workflow Info.
-//
-// Usage: This method is called internally by other methods and typically doesn't need to be called directly.
+// validate checks if the mutex is properly configured.
 func (h *Handler) validate() error {
 	if h.ResourceID == "" {
 		return ErrNoResourceID
@@ -216,58 +148,4 @@ func (h *Handler) validate() error {
 	}
 
 	return nil
-}
-
-// WithResourceID sets the resource ID for the mutex workflow. We start with the assumption that a valid resource ID
-// will be provided. The lock must always be held against the ids of core entities e.g. Stack, Repo or Resource. and the
-// format may look like ${entity_type}.${entity_id}.mutex
-//
-//   - entity type e.g stack, repo, resource
-//   - entity id e.g. the database id.
-//
-// for some cases, this may be made easy by getting the id of the parent workflow info e.g. if we are running stack
-// controller, we can get the stack controller id, which would be in the format "io.quantm.stack.${stack_id}" and then
-// adding the "mutex" suffix. Alernatively this can be set explicitly as well as
-// "io.quantm.repo.${repo_id}.branch.${branch_name}.mutex". This is the format that should be used when holding locks
-// against specific resources like repos or artifacts or cloud resources. This is a judgement call. The goal is, we
-// should be able to arrive at the lock id regardless of the context.
-func WithResourceID(id string) Option {
-	return func(m *Handler) {
-		m.ResourceID = id
-	}
-}
-
-// WithTimeout sets the timeout for the mutex workflow.
-func WithTimeout(timeout time.Duration) Option {
-	return func(m *Handler) {
-		m.Timeout = timeout
-	}
-}
-
-// New returns a new Mutex. It should always be called with WithResourceID option. If WithTimeout is not called, it
-// defaults to DefaultTimeout.
-//
-// Usage:
-//
-//	m := mutex.New(
-//	  ctx,
-//	  mutex.WithResourceID("id"),
-//	  mutex.WithTimeout(30*time.Minute), // Optional
-//	)
-//	if err := m.Prepare(ctx); err != nil {/*handle error*/}
-//	if err := m.Acquire(ctx); err != nil {/*handle error*/}
-//	if err := m.Release(ctx); err != nil {/*handle error*/}
-//	if err := m.Cleanup(ctx); err != nil {/*handle error*/}
-func New(ctx workflow.Context, opts ...Option) Mutex {
-	h := &Handler{Timeout: DefaultTimeout}
-	for _, opt := range opts {
-		opt(h)
-	}
-
-	h.Info = workflow.GetInfo(ctx)
-	h.logger = NewMutexHandlerLogger(ctx, h.ResourceID)
-
-	h.logger.info(h.Info.WorkflowExecution.ID, "create", "creating new mutex")
-
-	return h
 }
