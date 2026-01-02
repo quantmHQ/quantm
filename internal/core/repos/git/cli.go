@@ -14,6 +14,7 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 
 	var out bytes.Buffer
+
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 

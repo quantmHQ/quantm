@@ -88,7 +88,7 @@ func (h *Handler) OnAcquire(ctx workflow.Context, fn func(workflow.Context)) err
 	return nil
 }
 
-// Internal helper to acquire the lock
+// Internal helper to acquire the lock.
 func (h *Handler) acquire(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "acquire", "requesting lock")
 
@@ -112,7 +112,7 @@ func (h *Handler) acquire(ctx workflow.Context) error {
 	return NewAcquireLockError(h.ResourceID)
 }
 
-// Internal helper to release the lock
+// Internal helper to release the lock.
 func (h *Handler) release(ctx workflow.Context) error {
 	h.logger.info(h.Info.WorkflowExecution.ID, "release", "requesting release")
 

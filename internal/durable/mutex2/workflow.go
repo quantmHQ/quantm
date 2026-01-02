@@ -22,8 +22,9 @@ package mutex2
 import (
 	"time"
 
-	"go.breu.io/quantm/internal/durable/periodic"
 	"go.temporal.io/sdk/workflow"
+
+	"go.breu.io/quantm/internal/durable/periodic"
 )
 
 const (
@@ -67,7 +68,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 	// We use the periodic package to manage an idle timeout.
 	// If no activity occurs within IdleTimeout, the workflow shuts down.
 	idleTimer := periodic.New(ctx, IdleTimeout)
-	idleExpired := workflow.NewChannel(ctx)
+	idleExpired := workflow.NewBufferedChannel(ctx, 1)
 
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		idleTimer.Tick(ctx)
@@ -85,10 +86,10 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 		// 1. Wait for Acquire
 		acquirer.AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), state.on_acquire(ctx))
-		
+
 		// 2. Wait for Manual Shutdown/Cleanup
 		acquirer.AddFuture(shutdown, state.on_terminate(ctx))
-		
+
 		// 3. Wait for Idle Timeout
 		acquirer.AddReceive(idleExpired, func(c workflow.ReceiveChannel, m bool) {
 			state.logger.info(state.Handler.Info.WorkflowExecution.ID, "idle_timeout", "shutting down due to inactivity")
