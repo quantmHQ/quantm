@@ -97,7 +97,9 @@ func (t *interval) Reset(ctx workflow.Context) {
 }
 
 func (t *interval) Stop(ctx workflow.Context) {
-	t.channel.Send(ctx, time.Duration(0))
+	if t.running {
+		t.channel.Send(ctx, time.Duration(0))
+	}
 }
 
 // wait manages the execution loop of the interval, waiting for either the timer to expire or a new duration to be
@@ -121,7 +123,7 @@ func (t *interval) wait(ctx workflow.Context) {
 			if duration == 0 {
 				done = true
 			} else {
-				t.update(_ctx, t.duration)
+				t.update(_ctx, duration)
 			}
 		})
 

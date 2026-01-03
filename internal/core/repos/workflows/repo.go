@@ -22,23 +22,12 @@ func Repo(ctx workflow.Context, state *states.Repo) error {
 
 	// - signal handlers -
 
-	ref := workflow.GetSignalChannel(ctx, defs.SignalRef.String())
-	selector.AddReceive(ref, state.OnRef(ctx))
-
-	push := workflow.GetSignalChannel(ctx, defs.SignalPush.String())
-	selector.AddReceive(push, state.OnPush(ctx))
-
-	pr := workflow.GetSignalChannel(ctx, defs.SignalPullRequest.String())
-	selector.AddReceive(pr, state.OnPR(ctx))
-
-	prr := workflow.GetSignalChannel(ctx, defs.SignalPullRequestReview.String())
-	selector.AddReceive(prr, state.OnPRReview(ctx))
-
-	mq := workflow.GetSignalChannel(ctx, defs.SignalMergeQueue.String())
-	selector.AddReceive(mq, state.OnMergeQueue(ctx))
-
-	prrc := workflow.GetSignalChannel(ctx, defs.SignalPullRequestReviewComment.String())
-	selector.AddReceive(prrc, state.OnPRReviewComment(ctx))
+	selector.AddReceive(workflow.GetSignalChannel(ctx, defs.SignalRef.String()), state.OnRef(ctx))
+	selector.AddReceive(workflow.GetSignalChannel(ctx, defs.SignalPush.String()), state.OnPush(ctx))
+	selector.AddReceive(workflow.GetSignalChannel(ctx, defs.SignalPullRequest.String()), state.OnPR(ctx))
+	selector.AddReceive(workflow.GetSignalChannel(ctx, defs.SignalPRReview.String()), state.OnPRReview(ctx))
+	selector.AddReceive(workflow.GetSignalChannel(ctx, defs.SignalMergeQueue.String()), state.OnMergeQueue(ctx))
+	selector.AddReceive(workflow.GetSignalChannel(ctx, defs.ReviewComment.String()), state.OnReviewComment(ctx))
 
 	// - event loop -
 

@@ -66,11 +66,6 @@ func (m *MutexLogger) error(handler_id, action, msg string, keyvals ...any) {
 	m.write(m.logger.Error, handler_id, action, msg, keyvals...)
 }
 
-// Debug logs a debug-level message.
-func (m *MutexLogger) debug(handler_id, action, msg string, keyvals ...any) {
-	m.write(m.logger.Debug, handler_id, action, msg, keyvals...)
-}
-
 // Helper methods
 
 // prefix creates a formatted prefix for log messages.

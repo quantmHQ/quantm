@@ -51,8 +51,8 @@ const (
 	SignalPush                     = defs.SignalPush
 	SignalRef                      = defs.SignalRef
 	SignalPullRequest              = defs.SignalPullRequest
-	SignalPullRequestReview        = defs.SignalPullRequestReview
-	SignalPullRequestReviewComment = defs.SignalPullRequestReviewComment
+	SignalPullRequestReview        = defs.SignalPRReview
+	SignalPullRequestReviewComment = defs.ReviewComment
 	SignalMergeQueue               = defs.SignalMergeQueue
 )
 

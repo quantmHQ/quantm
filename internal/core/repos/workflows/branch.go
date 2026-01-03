@@ -28,10 +28,10 @@ func Branch(ctx workflow.Context, state *states.Branch) error {
 	label := workflow.GetSignalChannel(ctx, defs.SignalPullRequestLabel.String())
 	selector.AddReceive(label, state.OnLabel(ctx))
 
-	prr := workflow.GetSignalChannel(ctx, defs.SignalPullRequestReview.String())
+	prr := workflow.GetSignalChannel(ctx, defs.SignalPRReview.String())
 	selector.AddReceive(prr, state.OnPrReview(ctx))
 
-	prrc := workflow.GetSignalChannel(ctx, defs.SignalPullRequestReviewComment.String())
+	prrc := workflow.GetSignalChannel(ctx, defs.ReviewComment.String())
 	selector.AddReceive(prrc, state.OnPRReviewComment(ctx))
 
 	// - event loop -

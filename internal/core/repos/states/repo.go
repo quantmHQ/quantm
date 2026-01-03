@@ -95,8 +95,8 @@ func (state *Repo) OnPRReview(ctx workflow.Context) durable.ChannelHandler {
 	}
 }
 
-// OnPRReviewComment handles the pull request event review comment with on the repository.
-func (state *Repo) OnPRReviewComment(ctx workflow.Context) durable.ChannelHandler {
+// OnReviewComment handles the pull request event review comment with on the repository.
+func (state *Repo) OnReviewComment(ctx workflow.Context) durable.ChannelHandler {
 	return func(rx workflow.ReceiveChannel, more bool) {
 		label := &events.Event[eventsv1.RepoHook, eventsv1.PullRequestReview]{}
 		state.rx(ctx, rx, label)
