@@ -50,7 +50,7 @@ func (s *MutexTestSuite) TestMutexWorkflow_IdleShutdown() {
 	}
 	// Manual initialization to avoid calling workflow functions (NewMutex) outside of a workflow.
 	state := &mutex.MutexState{
-		Status:  mutex.MutexStatusAcquiring,
+		Status:  mutex.MutexStatusReady,
 		Handler: handler,
 		Timeout: handler.Timeout,
 		Persist: true,
@@ -85,7 +85,7 @@ func (s *MutexTestSuite) TestMutexWorkflow_ActivityResetIdle() {
 	}
 	// Manual initialization to avoid calling workflow functions (NewMutex) outside of a workflow.
 	state := &mutex.MutexState{
-		Status:  mutex.MutexStatusAcquiring,
+		Status:  mutex.MutexStatusReady,
 		Handler: handler,
 		Timeout: handler.Timeout,
 		Persist: true,
@@ -146,7 +146,7 @@ func (s *MutexTestSuite) TestMutexWorkflow_Contention() {
 
 	// Manual initialization
 	state := &mutex.MutexState{
-		Status:  mutex.MutexStatusAcquiring,
+		Status:  mutex.MutexStatusReady,
 		Handler: handlerA, // Initial handler for logging context
 		Persist: true,
 	}

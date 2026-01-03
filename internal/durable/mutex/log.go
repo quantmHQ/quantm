@@ -51,6 +51,11 @@ const (
 
 // Logging methods
 
+// Debug logs a debug-level message.
+func (m *MutexLogger) debug(handler_id, action, msg string, keyvals ...any) {
+	m.write(m.logger.Debug, handler_id, action, msg, keyvals...)
+}
+
 // Info logs an info-level message.
 func (m *MutexLogger) info(handler_id, action, msg string, keyvals ...any) {
 	m.write(m.logger.Info, handler_id, action, msg, keyvals...)

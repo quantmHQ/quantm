@@ -32,7 +32,7 @@ import (
 func AcquireMutexActivity(ctx context.Context, payload *Handler) (*workflow.Execution, error) {
 	// Initial state if the workflow needs to be started.
 	state := &MutexState{
-		Status:  MutexStatusAcquiring,
+		Status:  MutexStatusReady,
 		Handler: payload,
 		Timeout: payload.Timeout,
 		Persist: true,

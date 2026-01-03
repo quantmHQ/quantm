@@ -53,19 +53,16 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 
 	workflow.Go(ctx, func(ctx workflow.Context) {
 		idle.Tick(ctx)
-		// If Tick returns, it means the timer fired without being restarted/stopped.
 		tick.Send(ctx, true)
 	})
 
-	state.start(ctx)
-
 	for state.Persist {
-		state.wait_acquire(ctx)
+		state.ready(ctx)
 		idle.Restart(ctx, IdleTimeout)
 
 		workflow.NewSelector(ctx).
 			AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalAcquire.String()), state.on_aquire(ctx)).
-			AddReceive(tick, state.on_idle(ctx)).
+			AddReceive(tick, state.stop(ctx)).
 			Select(ctx)
 
 		if state.Status == MutexStatusLocked {
@@ -75,7 +72,7 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 			for state.Status == MutexStatusLocked {
 				workflow.NewSelector(ctx).
 					AddReceive(workflow.GetSignalChannel(ctx, WorkflowSignalRelease.String()), state.on_release(ctx)).
-					AddFuture(lease, state.on_expired(ctx)).
+					AddFuture(lease, state.expire(ctx)).
 					Select(ctx)
 			}
 		}
@@ -85,7 +82,6 @@ func MutexWorkflow(ctx workflow.Context, state *MutexState) error {
 		}
 	}
 
-	state.shutdown(ctx)
 	idle.Stop(ctx)
 
 	return nil
